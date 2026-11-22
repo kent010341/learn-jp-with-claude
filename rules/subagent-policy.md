@@ -18,4 +18,8 @@
 - 主對話只讀回傳的短摘要與路徑；不要把完整產物貼回對話。
 - 流程：generator → reviewer → 通過者 `python tools/jl.py import <round.json>` → 主對話開始出題。
   reviewer 退回的題目回給 generator 重做，或直接剔除，不得未審就匯入。
+- **`data/rounds/` 是暫存區**：generator 的題目檔與 reviewer 的 `.review.txt` 只在流程中存在。
+  審題通過並匯入（或複製進 `curriculum/seed/` 並確認已匯入）後，**主對話立刻刪除該輪所有檔案**，不留歷史。
+  審題紀錄中值得長期保留的通用教訓，先補進 `rules/content-policy.md` 再刪；其餘不留。
+  題目的來源由 `items.source` 追溯，退役原因在 `items.retired`，不需要保留檔案。
 - subagent 定義在 `.claude/agents/`。

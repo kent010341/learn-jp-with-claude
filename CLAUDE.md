@@ -24,6 +24,7 @@
 ## 讀取被 git 忽略的檔案
 `data/` 被 .gitignore 忽略，Grep/Glob 可能掃不到。進度資料一律透過 `python tools/jl.py ...` 取得；
 需讀 `data/rounds/*.json` 時用**明確完整路徑**以 Read 讀取。
+`data/rounds/` 是暫存區：匯入後必須刪除該輪檔案，不得累積（見 `rules/subagent-policy.md`）。
 
 ## Compact Instructions（自動或手動 compact 時務必保留）
 - 目前階段、本次對話的 session id、已作答題數與答對率。

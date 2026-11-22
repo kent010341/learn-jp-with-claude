@@ -11,4 +11,17 @@
   「鞏固」需要延遲後仍能提取的證據，而非單純到期（細節見 `tools/jl.py` 的 `consolidated` 判定與 `meta` 門檻）。
 - `rounds/`：**暫存區**，放 subagent 產出的整輪題目與審題紀錄；讀取請用明確完整路徑。
   匯入完成後即刪除，不累積；正常狀態下此目錄應為空（見 `../rules/subagent-policy.md`）。
+## 規劃（尚未實作）：schema v3 混淆表
+目的：`attempts` 以單題為單位，混淆表以「一組易混的東西」為單位，記錄跨單元的對比型錯誤，供 `resume`、`next`、generator、analyst 查詢。
+- `confusions(id, label, kind, cause, axis, gist, pair_key UNIQUE, miss_count, first_seen, last_seen, taught_at, taught_session, merged_into)`
+  - `kind` CHECK：`particle`｜`request_form`｜`politeness`｜`false_friend`｜`similar_form`｜`other`
+  - `cause` CHECK：`zh_transfer`｜`overgeneralize`｜`form_mixup`｜`sound_mixup`｜`unknown`
+  - `axis` CHECK：`form`｜`meaning`｜`usage`
+  - `gist`：一行判斷線索，`CHECK(length(gist) <= 80)`；**不存講解全文、範例句或講解角度**。是否已講解只看 `taught_at` 是否為空。
+  - `pair_key`：成員排序後串接，防止同一組重複建立。
+- `confusion_members(confusion_id, unit)`、`confusion_attempts(confusion_id, attempt_id)`；索引：`confusion_members(unit)`、`confusions(kind)`、`confusions(last_seen)`。
+- **狀態不存，用 view 衍生**：`taught_at` 為空＝observed；已講解且成員 unit 有任一尚未 `consolidated`（含尚無 `item_state`）＝drilling；全部 `consolidated`＝resolved。不另設狀態機，也不設 D（不刪除；建錯用 `merged_into`）。
+- 只在「兩個合理選項選錯」時建立；單純不認識不建。`cause` 不確定就填 `unknown`。
+- 成員必須對應既有 unit：v3 migration 需補上缺少的 unit（例：「ください／お願いします」目前沒有對應題與 unit），並以 `jl.py confusion add/taught/list` 操作，不得手改。
+- 不存作答速度；原始作答不重複存，由 `confusion_attempts` 關聯取得。
 - 必讀相關：`../tools/CLAUDE.md`、`../rules/CLAUDE.md`。

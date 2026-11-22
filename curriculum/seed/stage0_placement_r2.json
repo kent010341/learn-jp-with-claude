@@ -1,0 +1,271 @@
+{
+ "round_id": "stage0_placement_r2",
+ "stage": 0,
+ "items": [
+  {
+   "key": "r2_yasai_read",
+   "unit": "word_yasai",
+   "kind": "word",
+   "qtype": "free",
+   "format": "recall",
+   "prompt": "超市蔬果區的牌子寫著「野菜」，怎麼讀？（寫假名或羅馬拼音）",
+   "answers": [
+    "やさい",
+    "yasai",
+    "ヤサイ"
+   ],
+   "jp": "野菜",
+   "reading": "やさい",
+   "zh": "蔬菜",
+   "scenario": "超市看板",
+   "why_natural": "蔬果區與菜單（野菜炒め）常見，字面易誤讀",
+   "explain": "野菜＝やさい（蔬菜）；不是「野生的菜」，字面容易誤讀。",
+   "stage": 0
+  },
+  {
+   "key": "r2_atatame_reply",
+   "unit": "phrase_atatame",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "便利商店買便當，店員說「あたためますか？」你要加熱，哪句回應最自然？",
+   "choices": [
+    "いただきます",
+    "お願いします",
+    "いってきます",
+    "ごめんください"
+   ],
+   "answers": [
+    "お願いします"
+   ],
+   "jp": "お願いします",
+   "reading": "おねがいします",
+   "zh": "麻煩你（要加熱）",
+   "scenario": "便利商店結帳",
+   "why_natural": "買便當時店員幾乎必問",
+   "explain": "あたためますか＝要加熱嗎？要的話回「お願いします」；不要可說「大丈夫です」。",
+   "stage": 0
+  },
+  {
+   "key": "r2_tegami_mean",
+   "unit": "word_tegami",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "朋友說：「おばあちゃんから手紙（てがみ）がきたよ」。「手紙」是什麼？",
+   "choices": [
+    "衛生紙",
+    "手帕",
+    "書信",
+    "郵票"
+   ],
+   "answers": [
+    "書信"
+   ],
+   "jp": "手紙",
+   "reading": "てがみ",
+   "zh": "信（書信）",
+   "scenario": "日常對話",
+   "why_natural": "聊到收到長輩來信時的自然說法",
+   "explain": "手紙＝信（書信）；中文的「手紙」常被誤會成衛生紙，衛生紙是ティッシュ／トイレットペーパー。",
+   "stage": 0
+  },
+  {
+   "key": "r2_chotto_decline",
+   "unit": "phrase_chotto",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "朋友問「今夜、ごはん行かない？」你聽到對方回「あー、今夜はちょっと…」，意思是？",
+   "choices": [
+    "委婉拒絕",
+    "高興答應",
+    "問去哪裡吃",
+    "要對方請客"
+   ],
+   "answers": [
+    "委婉拒絕"
+   ],
+   "jp": "ちょっと…",
+   "reading": "ちょっと",
+   "zh": "有點不方便（委婉拒絕）",
+   "scenario": "LINE／當面邀約",
+   "why_natural": "日本人常用「ちょっと…」含蓄地拒絕",
+   "explain": "ちょっと本意是「一點點」，句尾語氣下沉、話說一半就是婉拒。",
+   "stage": 0
+  },
+  {
+   "key": "r2_mochikaeri_produce",
+   "unit": "phrase_mochikaeri",
+   "kind": "phrase",
+   "qtype": "free",
+   "format": "produce",
+   "prompt": "在速食店，店員問你內用或外帶，你想說「外帶」，日文怎麼說？",
+   "answers": [
+    "持ち帰りで",
+    "持ち帰りです",
+    "持ち帰り",
+    "もちかえりで",
+    "もちかえりです",
+    "もちかえり",
+    "お持ち帰りで",
+    "お持ち帰りです",
+    "お持ち帰り",
+    "おもちかえりで",
+    "おもちかえり",
+    "テイクアウトで",
+    "テイクアウト",
+    "テイクアウトです",
+    "持ち帰りでお願いします",
+    "持ち帰りでおねがいします",
+    "もちかえりでおねがいします",
+    "もちかえりでお願いします",
+    "持ち帰りをお願いします",
+    "テイクアウトでお願いします",
+    "お持ち帰りでお願いします",
+    "おもちかえりでおねがいします"
+   ],
+   "jp": "持ち帰りで",
+   "reading": "もちかえりで",
+   "zh": "外帶",
+   "scenario": "速食店點餐",
+   "why_natural": "店員一定會問「店內／外帶」",
+   "explain": "持ち帰り＝外帶（和語）；テイクアウト也通。內用是「店内（てんない）／ここで」。",
+   "stage": 0
+  },
+  {
+   "key": "r2_reji_mean",
+   "unit": "word_reji",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "在商場裡，你正在找地方，店員指著前方說「レジ、あちらです」，是指哪裡？",
+   "choices": [
+    "電梯",
+    "收銀台",
+    "試衣間",
+    "提款機"
+   ],
+   "answers": [
+    "收銀台"
+   ],
+   "jp": "レジ",
+   "reading": "レジ",
+   "zh": "收銀台",
+   "scenario": "超市／商場",
+   "why_natural": "找不到結帳處時常聽到",
+   "explain": "レジ（register）＝收銀台；日文外來語常被縮短。",
+   "stage": 0
+  },
+  {
+   "key": "r2_otsuri_mean",
+   "unit": "word_otsuri",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "付完錢，店員一邊遞東西給你一邊說「お釣り（おつり）です」，「お釣り」是什麼？",
+   "answers": [
+    "找零"
+   ],
+   "jp": "お釣り",
+   "reading": "おつり",
+   "zh": "找零",
+   "scenario": "結帳",
+   "why_natural": "付現時常聽到",
+   "explain": "お釣り＝找回的零錢；釣本是釣魚，這裡是慣用寫法。",
+   "stage": 0,
+   "choices": [
+    "找零",
+    "收據",
+    "點數卡",
+    "塑膠袋"
+   ]
+  },
+  {
+   "key": "r2_de_meet",
+   "unit": "grammar_de",
+   "kind": "grammar",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "LINE 約朋友：「あした、駅（　）会おう」空格填哪個助詞？",
+   "choices": [
+    "を",
+    "で",
+    "の",
+    "が"
+   ],
+   "answers": [
+    "で"
+   ],
+   "jp": "駅で会おう",
+   "reading": "えきであおう",
+   "zh": "明天在車站見",
+   "scenario": "LINE 約碰面",
+   "why_natural": "約見面的基本句型",
+   "explain": "動作發生的地點用で；「あう」的對象才用に／と。",
+   "stage": 0
+  },
+  {
+   "key": "r2_tsuita_produce",
+   "unit": "phrase_tsuita",
+   "kind": "phrase",
+   "qtype": "free",
+   "format": "produce",
+   "prompt": "朋友 LINE 問「今どこ？」你已經抵達了，想回「我到了」，日文怎麼回？",
+   "answers": [
+    "着いた",
+    "ついた",
+    "着いたよ",
+    "ついたよ",
+    "着きました",
+    "つきました",
+    "着いたー",
+    "ついたー",
+    "着いた！",
+    "ついた！",
+    "着いたよ！",
+    "ついたよ！",
+    "いま着いた",
+    "今着いた",
+    "いまついた",
+    "今ついた",
+    "着いたよー",
+    "ついたよー",
+    "いま着いたよ",
+    "今着いたよ",
+    "いまついたよ"
+   ],
+   "jp": "着いた",
+   "reading": "ついた",
+   "zh": "我到了",
+   "scenario": "LINE 約碰面",
+   "why_natural": "到達時最常傳的短句",
+   "explain": "着いた＝到了（口語常體）；對方等你時還可加「よ」。",
+   "stage": 0
+  },
+  {
+   "key": "r2_osusume_mean",
+   "unit": "word_osusume",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "居酒屋的菜單角落寫著「今日のおすすめ」，這是什麼？",
+   "choices": [
+    "本日特價",
+    "限定商品",
+    "店家推薦",
+    "加大份量"
+   ],
+   "answers": [
+    "店家推薦"
+   ],
+   "jp": "おすすめ",
+   "reading": "おすすめ",
+   "zh": "推薦",
+   "scenario": "餐廳菜單",
+   "why_natural": "菜單與店員常說的詞",
+   "explain": "おすすめ＝推薦；問店員可說「おすすめは何ですか？」。",
+   "stage": 0
+  }
+ ]
+}

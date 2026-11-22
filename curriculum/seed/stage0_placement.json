@@ -1,0 +1,495 @@
+{
+ "round_id": "stage0_placement",
+ "stage": 0,
+ "items": [
+  {
+   "key": "kana_nu_read",
+   "unit": "kana_nu",
+   "kind": "kana",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "「ぬ」要怎麼唸？",
+   "choices": [
+    "nu",
+    "me",
+    "ne",
+    "no"
+   ],
+   "answers": [
+    "nu"
+   ],
+   "jp": "ぬ",
+   "reading": "ぬ",
+   "zh": "nu",
+   "scenario": "假名辨識（平假名易混）",
+   "why_natural": "ぬ和め字形相近，招牌與菜單上常遇到",
+   "explain": "ぬ（nu）有一個小圈圈尾巴；め（me）沒有。",
+   "stage": 0
+  },
+  {
+   "key": "word_deguchi_mean",
+   "unit": "word_deguchi",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "車站指示牌上寫著「出口」，這是指哪個地方？",
+   "choices": [
+    "要出去時走的出口",
+    "要進去時走的入口",
+    "廁所",
+    "售票處"
+   ],
+   "answers": [
+    "要出去時走的出口"
+   ],
+   "jp": "出口",
+   "reading": "でぐち",
+   "zh": "出口（出去的地方）",
+   "scenario": "車站/商場看板",
+   "why_natural": "出口是車站與商場最常見的指示牌",
+   "explain": "出口（でぐち）＝出去的地方；相反是入口（いりぐち）。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_fukuro_mean",
+   "unit": "phrase_fukuro",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "便利商店結帳時，店員說「袋（ふくろ）はご利用（りよう）ですか？」是在問什麼？",
+   "choices": [
+    "問你要不要購物袋",
+    "問你要不要加熱",
+    "問你要不要筷子",
+    "問你要不要收據"
+   ],
+   "answers": [
+    "問你要不要購物袋"
+   ],
+   "jp": "袋はご利用ですか？",
+   "reading": "ふくろはごりようですか",
+   "zh": "問你要不要購物袋",
+   "scenario": "便利商店結帳",
+   "why_natural": "日本便利商店結帳時店員幾乎一定會問這句",
+   "explain": "袋（ふくろ）＝袋子；ご利用ですか是客氣地問「要用嗎」。",
+   "stage": 0
+  },
+  {
+   "key": "kana_tsu_read",
+   "unit": "kana_tsu",
+   "kind": "kana",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "片假名「ツ」要怎麼唸？",
+   "choices": [
+    "tsu",
+    "shi",
+    "so",
+    "n"
+   ],
+   "answers": [
+    "tsu"
+   ],
+   "jp": "ツ",
+   "reading": "ツ",
+   "zh": "tsu",
+   "scenario": "假名辨識（片假名易混）",
+   "why_natural": "ツ和シ是片假名最易混的一對，菜單與店名常見（ツナ、シチュー）",
+   "explain": "ツ（tsu）的三劃都是由上往下；シ（shi）的最後一劃是由下往上撇。",
+   "stage": 0
+  },
+  {
+   "key": "grammar_toire_wa",
+   "unit": "grammar_wa",
+   "kind": "grammar",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "在車站問路：「トイレ（　）どこですか？」空格要填哪個助詞？",
+   "choices": [
+    "は",
+    "を",
+    "に",
+    "の"
+   ],
+   "answers": [
+    "は"
+   ],
+   "jp": "トイレはどこですか？",
+   "reading": "トイレはどこですか",
+   "zh": "廁所在哪裡？",
+   "scenario": "車站問路",
+   "why_natural": "旅行時最常用的問句之一",
+   "explain": "「〜はどこですか」＝問某物在哪；は當助詞時唸 wa。",
+   "stage": 0
+  },
+  {
+   "key": "word_eigyochu_mean",
+   "unit": "word_eigyochu",
+   "kind": "word",
+   "qtype": "free",
+   "format": "recall",
+   "prompt": "咖啡店門口掛著「営業中（えいぎょうちゅう）」的牌子，是什麼意思？（用中文回答）",
+   "answers": [
+    "營業中",
+    "營業",
+    "開店",
+    "開門",
+    "有營業",
+    "営業中",
+    "えいぎょうちゅう",
+    "正在營業"
+   ],
+   "jp": "営業中",
+   "reading": "えいぎょうちゅう",
+   "zh": "營業中",
+   "scenario": "店家門口看板",
+   "why_natural": "店門口的牌子，翻面常是「準備中」",
+   "explain": "営業中＝營業中；相反是「準備中」。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_arigatou_mean",
+   "unit": "phrase_arigatou",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "店員幫你把東西裝好遞給你，你想說「謝謝」，哪一句最合適？",
+   "choices": [
+    "ありがとう",
+    "ごめんなさい",
+    "いただきます",
+    "おやすみなさい"
+   ],
+   "answers": [
+    "ありがとう"
+   ],
+   "jp": "ありがとう",
+   "reading": "ありがとう",
+   "zh": "謝謝",
+   "scenario": "購物道謝",
+   "why_natural": "最基本的道謝，日常隨時會用",
+   "explain": "ありがとう＝謝謝；ごめんなさい是道歉，いただきます是開動前說的。",
+   "stage": 0
+  },
+  {
+   "key": "kana_re_read",
+   "unit": "kana_re",
+   "kind": "kana",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "「れ」要怎麼唸？",
+   "choices": [
+    "re",
+    "wa",
+    "ne",
+    "ru"
+   ],
+   "answers": [
+    "re"
+   ],
+   "jp": "れ",
+   "reading": "れ",
+   "zh": "re",
+   "scenario": "假名辨識（平假名易混）",
+   "why_natural": "れ、ね、わ 字形相近，看板與菜單常遇到（例：「れんこん」）",
+   "explain": "れ（re）的尾巴向外撇；わ（wa）的尾巴向內收圓；ね（ne）尾巴有個小圈。",
+   "stage": 0
+  },
+  {
+   "key": "word_kinen_mean",
+   "unit": "word_kinen",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "餐廳門口貼著「禁煙（きんえん）」，是什麼意思？",
+   "choices": [
+    "禁止吸菸",
+    "禁止拍照",
+    "禁止進入",
+    "營業中"
+   ],
+   "answers": [
+    "禁止吸菸"
+   ],
+   "jp": "禁煙",
+   "reading": "きんえん",
+   "zh": "禁止吸菸",
+   "scenario": "餐廳/車站看板",
+   "why_natural": "禁煙標示在餐廳、車站、飯店常見",
+   "explain": "禁煙＝禁止吸菸；漢字「煙」就是菸/煙。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_ikura_mean",
+   "unit": "phrase_ikura",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "在商店，客人拿起商品問店員「これ、いくらですか？」，他在問什麼？",
+   "choices": [
+    "這個多少錢",
+    "這個在哪裡",
+    "這個是什麼",
+    "這個可以嗎"
+   ],
+   "answers": [
+    "這個多少錢"
+   ],
+   "jp": "これ、いくらですか？",
+   "reading": "これ、いくらですか",
+   "zh": "這個多少錢？",
+   "scenario": "購物問價",
+   "why_natural": "逛街購物最常用的句子",
+   "explain": "いくら＝多少錢；どこ＝哪裡、なに＝什麼。",
+   "stage": 0
+  },
+  {
+   "key": "grammar_kore_wo",
+   "unit": "grammar_wo",
+   "kind": "grammar",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "在店裡指著商品說：「これ（　）ください」。空格填哪個助詞？",
+   "choices": [
+    "を",
+    "は",
+    "に",
+    "が"
+   ],
+   "answers": [
+    "を"
+   ],
+   "jp": "これをください",
+   "reading": "これをください",
+   "zh": "請給我這個",
+   "scenario": "點餐/購物",
+   "why_natural": "點餐買東西時的基本句型",
+   "explain": "「〜をください」＝請給我〜；を唸 o。",
+   "stage": 0
+  },
+  {
+   "key": "word_deguchi_read",
+   "unit": "word_deguchi",
+   "kind": "word",
+   "qtype": "free",
+   "format": "recall",
+   "prompt": "車站看板上的「出口」怎麼讀？（寫假名或羅馬拼音）",
+   "answers": [
+    "でぐち",
+    "デグチ",
+    "deguchi",
+    "deguti",
+    "de guchi"
+   ],
+   "jp": "出口",
+   "reading": "でぐち",
+   "zh": "出口（讀音）",
+   "scenario": "車站看板",
+   "why_natural": "出口是旅行中最常看到的字之一",
+   "explain": "出口讀作でぐち，注意「ぐ」是濁音；入口是いりぐち。",
+   "stage": 0
+  },
+  {
+   "key": "kana_so_read",
+   "unit": "kana_so",
+   "kind": "kana",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "片假名「ソ」要怎麼唸？",
+   "choices": [
+    "so",
+    "n",
+    "shi",
+    "tsu"
+   ],
+   "answers": [
+    "so"
+   ],
+   "jp": "ソ",
+   "reading": "ソ",
+   "zh": "so",
+   "scenario": "假名辨識（片假名易混）",
+   "why_natural": "ソ和ン長得像，ソース、ソーダ等菜單用字常出現",
+   "explain": "ソ（so）的兩劃都是由上往下；ン（n）的最後一劃是由下往上撇。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_daijoubu_mean",
+   "unit": "phrase_daijoubu",
+   "kind": "phrase",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "店員問「お箸（はし）はいりますか？」你回「大丈夫です（だいじょうぶです）」，意思是什麼？",
+   "choices": [
+    "不用了",
+    "我要",
+    "我不知道",
+    "太貴了"
+   ],
+   "answers": [
+    "不用了"
+   ],
+   "jp": "大丈夫です",
+   "reading": "だいじょうぶです",
+   "zh": "不用了／沒問題",
+   "scenario": "便利商店婉拒",
+   "why_natural": "日本人婉拒時常說「大丈夫です」",
+   "explain": "大丈夫です在被詢問時多半是「不用了」；看語氣也可能是「沒問題」。",
+   "stage": 0
+  },
+  {
+   "key": "word_omizu_mean",
+   "unit": "word_omizu",
+   "kind": "word",
+   "qtype": "free",
+   "format": "recall",
+   "prompt": "餐廳店員說「お水（おみず）」，指的是什麼？（用中文回答）",
+   "answers": [
+    "水",
+    "冷水",
+    "開水",
+    "お水",
+    "おみず",
+    "白開水",
+    "冰水",
+    "涼水"
+   ],
+   "jp": "お水",
+   "reading": "おみず",
+   "zh": "水",
+   "scenario": "餐廳",
+   "why_natural": "餐廳一入座就會被問「お水どうぞ」",
+   "explain": "お水＝水（加「お」比較客氣）；お茶＝茶。",
+   "stage": 0
+  },
+  {
+   "key": "grammar_doko_ni",
+   "unit": "grammar_ni",
+   "kind": "grammar",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "LINE 訊息問朋友：「今（いま）どこ（　）いる？」空格填哪個助詞？",
+   "choices": [
+    "に",
+    "を",
+    "の",
+    "と"
+   ],
+   "answers": [
+    "に"
+   ],
+   "jp": "今どこにいる？",
+   "reading": "いまどこにいる",
+   "zh": "你現在在哪？",
+   "scenario": "LINE 訊息",
+   "why_natural": "約碰面時很常傳",
+   "explain": "「どこにいる？」＝在哪裡（存在的地點用に）。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_arigatou_produce",
+   "unit": "phrase_arigatou",
+   "kind": "phrase",
+   "qtype": "free",
+   "format": "produce",
+   "prompt": "店員把找零遞給你，你想說「謝謝」，用日文怎麼說？",
+   "answers": [
+    "ありがとう",
+    "ありがとうございます",
+    "ありがとうございました",
+    "有難う",
+    "有難うございます",
+    "どうも",
+    "ありがとう。",
+    "ありがとうございます。",
+    "ありがと",
+    "どうもありがとうございます",
+    "どうもありがとう",
+    "ありがとうございました。"
+   ],
+   "jp": "ありがとうございます",
+   "reading": "ありがとうございます",
+   "zh": "謝謝",
+   "scenario": "購物道謝",
+   "why_natural": "購物完一定會說的一句",
+   "explain": "ありがとう（隨意）／ありがとうございます（有禮貌），長音「う」不可漏。",
+   "stage": 0
+  },
+  {
+   "key": "word_eki_read",
+   "unit": "word_eki",
+   "kind": "word",
+   "qtype": "free",
+   "format": "recall",
+   "prompt": "旅行時看到看板上的「駅」，怎麼讀？（寫假名或羅馬拼音）",
+   "answers": [
+    "えき",
+    "eki",
+    "エキ"
+   ],
+   "jp": "駅",
+   "reading": "えき",
+   "zh": "車站",
+   "scenario": "車站看板",
+   "why_natural": "路標與地圖上最常見的字",
+   "explain": "駅＝えき（車站）；「〜駅」是站名後綴。",
+   "stage": 0
+  },
+  {
+   "key": "phrase_ikura_produce",
+   "unit": "phrase_ikura",
+   "kind": "phrase",
+   "qtype": "free",
+   "format": "produce",
+   "prompt": "在商店想問價錢「這個多少錢？」，日文怎麼說？",
+   "answers": [
+    "いくらですか",
+    "いくら",
+    "いくらですか？",
+    "これいくらですか",
+    "これ、いくらですか",
+    "これはいくらですか",
+    "いくらです",
+    "幾らですか",
+    "幾ら",
+    "おいくらですか",
+    "おいくらですか？",
+    "おいくら",
+    "これおいくらですか",
+    "これいくら",
+    "いくらでしょうか"
+   ],
+   "jp": "いくらですか？",
+   "reading": "いくらですか",
+   "zh": "多少錢？",
+   "scenario": "購物問價",
+   "why_natural": "購物問價最常用的句型",
+   "explain": "いくらですか＝多少錢；「か」放句尾表示疑問。",
+   "stage": 0
+  },
+  {
+   "key": "word_hiku_mean",
+   "unit": "word_hiku",
+   "kind": "word",
+   "qtype": "choice",
+   "format": "recognize",
+   "prompt": "店門把手上貼著「引（ひく）」，要怎麼開門？",
+   "choices": [
+    "拉",
+    "推",
+    "往旁邊滑",
+    "不能開"
+   ],
+   "answers": [
+    "拉"
+   ],
+   "jp": "引",
+   "reading": "ひく",
+   "zh": "拉",
+   "scenario": "門上標示",
+   "why_natural": "門上常見「押／引」",
+   "explain": "引（ひく）＝拉；押（おす）＝推。",
+   "stage": 0
+  }
+ ]
+}

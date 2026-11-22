@@ -1,0 +1,7 @@
+# 使用者進度與個人狀態（換人使用時不應帶走）
+data/*
+!data/CLAUDE.md
+!data/.gitkeep
+.claude/settings.local.json
+__pycache__/
+*.pyc

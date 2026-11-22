@@ -369,6 +369,12 @@ def grade_answer(item, raw, choices=None):
         for a in answers:
             if norm(a, False) == u:
                 return {"result": "correct", "quality": 4, "mode": mode, "matched": a}
+        # 輸入法差異：助詞 は/を 以 わ/お 輸入，視為完全正確（長音等其他差異仍不抹平）
+        _pt = str.maketrans({"は": "わ", "を": "お"})
+        if item["kind"] != "kana":
+            for a in answers:
+                if norm(a, False).translate(_pt) == u.translate(_pt):
+                    return {"result": "correct", "quality": 4, "mode": mode, "matched": a}
         # 片假名/平假名混用：非 kana 題視為正確但品質 3
         if item["kind"] != "kana":
             for a in answers:

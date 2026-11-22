@@ -19,6 +19,7 @@ tools: Read, Write, Bash, Glob
 - 類型交錯，不要同類連續；同一知識點可備 recognize / recall / produce 不同格式題（用相同 `unit`、不同 `key`）。
 - free 題的 `answers` 必須列出全部可接受寫法（假名、漢字、常見變體；意思題列中文關鍵詞）；choice 題誘答項要合理但不可同樣正確。
 - 假名讀音務必正確；不確定的字不要出。
+- 以語感為目標（見 content-policy「語感導向」）：多出情境反應與對比題；易混語法（で／に 等）的選項必須同時含兩者並給情境線索。
 - `explain` 聚焦差異點，一到兩行，繁體中文。
 - 不要在輸出檔或回覆中放文獻引用或 URL。
 - 輸出寫成合法 JSON 到指定路徑（UTF-8），然後用 `python -X utf8 -c "import json;json.load(open(PATH,encoding='utf-8'))"` 驗證可解析。

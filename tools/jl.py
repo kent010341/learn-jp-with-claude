@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("JL_DB") or ROOT / "data" / "learning.db")
 SEED_DIR = Path(os.environ.get("JL_SEED") or ROOT / "curriculum" / "seed")
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 DEFAULT_META = {
     "schema_version": SCHEMA_VERSION,
@@ -40,6 +40,11 @@ _DECAY = -0.5
 _S0 = {0: 0.3, 1: 0.5, 2: 0.8, 3: 1.5, 4: 3.0, 5: 5.0}
 
 QUALITY_PASS = 3
+OUTCOMES = ("correct", "incorrect", "skipped")
+CONFIDENCES = ("sure", "unsure", "guess")
+BASES = ("known", "intuition", "context", "assisted", "other")
+# 這些依據下的「答對」不算提取證據（結果只排程重測，不加穩定度也不算失誤）
+NO_EVIDENCE_BASES = ("context", "assisted", "other")
 FORMAT_RANK = {"recognize": 0, "recall": 1, "produce": 2}
 
 
@@ -84,8 +89,13 @@ CREATE TABLE IF NOT EXISTS items(
 CREATE TABLE IF NOT EXISTS attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL, unit TEXT NOT NULL, ts REAL NOT NULL,
-  session_id INTEGER, quality INTEGER NOT NULL,
-  user_answer TEXT, answer_mode TEXT, latency_s REAL
+  session_id INTEGER,
+  outcome TEXT NOT NULL CHECK(outcome IN ('correct','incorrect','skipped')),
+  confidence TEXT CHECK(confidence IS NULL OR confidence IN ('sure','unsure','guess')),
+  basis TEXT CHECK(basis IS NULL OR basis IN ('known','intuition','context','assisted','other')),
+  answer_mode TEXT,            -- jp | romaji | choice | unknown（輸入形式）
+  user_answer TEXT,            -- 僅存原始作答
+  note TEXT                    -- 自由文字（細節、自述原因）
 );
 CREATE TABLE IF NOT EXISTS item_state(
   unit TEXT PRIMARY KEY,
@@ -103,16 +113,39 @@ CREATE INDEX IF NOT EXISTS idx_items_unit ON items(unit);
 """
 
 
+def migrate_v1_attempts(con):
+    """v1 attempts(quality, latency_s) → v2 attempts(outcome, confidence, basis, note)。舊欄位捨棄。"""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(attempts)")}
+    if "quality" not in cols:
+        return False
+    con.execute("DROP INDEX IF EXISTS idx_attempts_unit")
+    con.execute("ALTER TABLE attempts RENAME TO attempts_v1")
+    con.executescript(SCHEMA)
+    con.execute("""INSERT INTO attempts(id,item_id,unit,ts,session_id,outcome,answer_mode,user_answer)
+                   SELECT id,item_id,unit,ts,session_id,
+                          CASE WHEN quality>=3 THEN 'correct' WHEN quality=0 THEN 'skipped' ELSE 'incorrect' END,
+                          answer_mode,user_answer FROM attempts_v1""")
+    con.execute("DROP TABLE attempts_v1")
+    con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','2')")
+    return True
+
+
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    migrated = False
+    if con.execute("SELECT 1 FROM sqlite_master WHERE name='attempts'").fetchone():
+        migrated = migrate_v1_attempts(con)
     con.executescript(SCHEMA)
     if "retired" not in {r[1] for r in con.execute("PRAGMA table_info(items)")}:
         con.execute("ALTER TABLE items ADD COLUMN retired TEXT")
     for k, v in DEFAULT_META.items():
         con.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)", (k, v))
     con.commit()
+    if migrated:
+        cmd_rebuild(con, None)
+        print("[migrate] schema v1 -> v2 完成，已重算排程狀態", file=sys.stderr)
     return con
 
 
@@ -396,21 +429,46 @@ def is_consolidated(st, req, cfg, elapsed):
     return True
 
 
-def apply_attempt(st, q, ts, fmt, req, cfg):
+def evidence(outcome, confidence, basis, mode):
+    """(結果, 信心, 依據, 輸入形式) → 排程證據碼：0 略過／1 答錯／'N' 無證據的答對／'W' 弱證據／3、4 一般答對。
+    答對但是猜的、或依據為前後文／被提示／其他 → 無證據；不確定 → 弱證據；其餘為一般證據。
+    不使用作答速度。"""
+    if outcome == "skipped":
+        return 0
+    if outcome == "incorrect":
+        return 1
+    if basis in NO_EVIDENCE_BASES or confidence == "guess":
+        return "N"
+    if confidence == "unsure":
+        return "W"
+    return 4 if mode in ("jp", "romaji") else 3
+
+
+def apply_attempt(st, ev, ts, fmt, req, cfg):
     st = dict(st)
+    if ev == "N":  # 無證據：不改穩定度、不算失誤，只確保約一天內會再測
+        st["formats_passed"] = list(st["formats_passed"])
+        st["success_days"] = list(st["success_days"])
+        if st["last_ts"] is None:
+            st.update(stability_days=0.3, difficulty=7.0, last_ts=ts, tier="learning", due_ts=ts + 86400)
+        else:
+            st["due_ts"] = min(st["due_ts"], ts + 86400)
+        return st
+    weak = ev == "W"
+    q = 3 if weak else ev
     elapsed = (ts - st["last_ts"]) / 86400 if st["last_ts"] is not None else 0
     st["formats_passed"] = list(st["formats_passed"])
     st["success_days"] = list(st["success_days"])
     retention = float(cfg["target_retention"])
     if st["last_ts"] is None:
-        st["stability_days"] = _S0[q]
+        st["stability_days"] = _S0[2 if weak else q]
         st["difficulty"] = clamp(9 - 1.5 * q, 1, 10)
     else:
         S, D = st["stability_days"], st["difficulty"]
         R = retr((ts - st["last_ts"]) / 86400, S)
         if q >= QUALITY_PASS:
             g = math.exp(0.9) * (11 - D) * S ** -0.15 * (math.exp(1.0 - R) - 1)
-            S = min(S * (1 + g * {3: 0.8, 4: 1.0, 5: 1.3}[q]), 1825)
+            S = min(S * (1 + g * {3: 0.8, 4: 1.0, 5: 1.3}[q] * (0.4 if weak else 1.0)), 1825)
             D = clamp(D + {3: 0.2, 4: -0.1, 5: -0.3}[q], 1, 10)
         else:
             S = max(0.3, S * (0.2 + 0.05 * q))   # 下調但不歸零：遺忘的是提取而非全部消失
@@ -418,7 +476,7 @@ def apply_attempt(st, q, ts, fmt, req, cfg):
             if st["reps_success"] > 0:
                 st["lapses"] += 1
         st["stability_days"], st["difficulty"] = S, D
-    if q >= QUALITY_PASS:
+    if q >= QUALITY_PASS and not weak:  # 弱證據不計入鞏固所需的成功日與格式
         st["reps_success"] += 1
         if fmt not in st["formats_passed"]:
             st["formats_passed"].append(fmt)
@@ -554,30 +612,33 @@ def cmd_grade(con, args):
     g = grade_answer(it, raw, json.loads(shown) if shown else None)
     answers = json.loads(it["answers"])
     print(f"result: {g['result']}")
-    print(f"suggested_quality: {g['quality'] if g['quality'] is not None else '(請自行判斷 0-5)'}")
+    oc = {"correct": "correct", "incorrect": "incorrect", "unknown": "skipped"}.get(g["result"], "<outcome>")
+    print(f"suggested_outcome: {oc if oc != '<outcome>' else '(請自行判斷 correct/incorrect)'}")
+    if g["result"] == "incorrect" and g["quality"] == 2:
+        print("near_miss: yes（接近正解，可在 note 註明）")
     print(f"mode: {g['mode']}")
     print("--- 回饋素材（僅作答後使用）")
     print(f"正解: {answers[0]}   全部可接受: {' / '.join(answers)}")
     print(f"jp: {it['jp']}  reading: {it['reading']}  zh: {it['zh']}")
     print(f"explain: {it['explain']}")
-    q = g["quality"] if g["quality"] is not None else "<q>"
     safe = raw.replace('"', "'")
-    print(f'record_cmd: python tools/jl.py record {it["id"]} {q} --mode {g["mode"]} --answer "{safe}"')
+    print(f'record_cmd: python tools/jl.py record {it["id"]} {oc} --mode {g["mode"]} --answer "{safe}"'
+          '  [可加 --confidence sure|unsure|guess --basis known|intuition|context|assisted|other --note "..."]')
 
 
 def cmd_record(con, args):
     it = con.execute("SELECT * FROM items WHERE id=?", (args.item_id,)).fetchone()
     if not it:
         raise SystemExit("no such item")
-    if not 0 <= args.quality <= 5:
-        raise SystemExit("quality must be 0-5")
     ts = now_ts()
     sid = current_session(con, create=True)
-    con.execute("""INSERT INTO attempts(item_id,unit,ts,session_id,quality,user_answer,answer_mode,latency_s)
-                   VALUES(?,?,?,?,?,?,?,?)""",
-                (it["id"], it["unit"], ts, sid, args.quality, args.answer, args.mode, args.latency))
+    con.execute("""INSERT INTO attempts(item_id,unit,ts,session_id,outcome,confidence,basis,answer_mode,user_answer,note)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (it["id"], it["unit"], ts, sid, args.outcome, args.confidence, args.basis, args.mode,
+                 args.answer, args.note))
     cfg = cfg_of(con)
-    st = apply_attempt(load_state(con, it["unit"]), args.quality, ts, it["format"],
+    ev = evidence(args.outcome, args.confidence, args.basis, args.mode)
+    st = apply_attempt(load_state(con, it["unit"]), ev, ts, it["format"],
                        required_formats(con, it["unit"]), cfg)
     save_state(con, it["unit"], st)
     con.commit()
@@ -592,9 +653,11 @@ def cmd_rebuild(con, args):
     for u in units:
         st = empty_state()
         req = required_formats(con, u)
-        for a in con.execute("""SELECT a.ts, a.quality, i.format FROM attempts a JOIN items i ON i.id=a.item_id
+        for a in con.execute("""SELECT a.ts, a.outcome, a.confidence, a.basis, a.answer_mode, i.format
+                                FROM attempts a JOIN items i ON i.id=a.item_id
                                 WHERE a.unit=? ORDER BY a.ts, a.id""", (u,)):
-            st = apply_attempt(st, a["quality"], a["ts"], a["format"], req, cfg)
+            ev = evidence(a["outcome"], a["confidence"], a["basis"], a["answer_mode"])
+            st = apply_attempt(st, ev, a["ts"], a["format"], req, cfg)
         save_state(con, u, st)
     con.commit()
     print(f"rebuilt {len(units)} units")
@@ -602,7 +665,8 @@ def cmd_rebuild(con, args):
 
 def cmd_due(con, args):
     ts = now_ts()
-    rows = con.execute("SELECT * FROM item_state ORDER BY due_ts").fetchall()
+    rows = con.execute("""SELECT * FROM item_state s WHERE EXISTS
+                          (SELECT 1 FROM items WHERE unit=s.unit AND retired IS NULL) ORDER BY due_ts""").fetchall()
     due = [r for r in rows if r["due_ts"] <= ts]
     print(f"due now: {len(due)} / tracked: {len(rows)}")
     for r in due[:20]:
@@ -620,25 +684,31 @@ def cmd_weak(con, args):
                             (SELECT zh FROM items WHERE unit=s.unit LIMIT 1) zh
                             FROM item_state s ORDER BY s.lapses DESC, s.stability_days ASC LIMIT ?""", (args.limit,)):
         print(f"  {r['unit']} ({r['jp']} / {r['zh']}) tier={r['tier']} S={r['S']:.1f}d lapses={r['lapses']}")
-    print("== 最近 50 筆作答：各類型答對率（quality>=3）")
-    for r in con.execute("""SELECT i.kind k, i.format f, COUNT(*) n, SUM(a.quality>=3) ok FROM
+    print("== 最近 50 筆作答：各類型答對率（含猜對、不確定；細分見 stats）")
+    for r in con.execute("""SELECT i.kind k, i.format f, COUNT(*) n, SUM(a.outcome='correct') ok FROM
                             (SELECT * FROM attempts ORDER BY id DESC LIMIT 50) a JOIN items i ON i.id=a.item_id
                             GROUP BY i.kind, i.format"""):
         print(f"  {r['k']}/{r['f']}: {r['ok']}/{r['n']}")
     if args.detail:
         print("== 最近錯誤（作答 vs 正解）")
-        for r in con.execute("""SELECT a.user_answer ua, a.quality q, i.jp, i.zh, i.kind FROM attempts a
-                                JOIN items i ON i.id=a.item_id WHERE a.quality<3 ORDER BY a.id DESC LIMIT 15"""):
-            print(f"  [{r['kind']}] {r['jp']} ({r['zh']}) ← 你答: {r['ua']}  q={r['q']}")
+        for r in con.execute("""SELECT a.user_answer ua, a.outcome o, a.confidence c, a.basis b, a.note n,
+                                i.jp, i.zh, i.kind FROM attempts a
+                                JOIN items i ON i.id=a.item_id WHERE a.outcome!='correct'
+                                ORDER BY a.id DESC LIMIT 15"""):
+            print(f"  [{r['kind']}] {r['jp']} ({r['zh']}) ← 你答: {r['ua']}  {r['o']}/{r['c']}/{r['b']}  {r['n'] or ''}")
 
 
 def cmd_stats(con, args):
     print("tier counts:", {r["tier"]: r["n"] for r in con.execute("SELECT tier, COUNT(*) n FROM item_state GROUP BY tier")})
-    r = con.execute("SELECT COUNT(*) n, SUM(quality>=3) ok FROM attempts").fetchone()
+    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts").fetchone()
     print(f"attempts total: {r['n']}  correct: {r['ok'] or 0}")
+    print("correct by confidence:", {(x["c"] or "unreported"): x["n"] for x in con.execute(
+        "SELECT confidence c, COUNT(*) n FROM attempts WHERE outcome='correct' GROUP BY confidence")})
+    print("correct by basis:", {(x["b"] or "unreported"): x["n"] for x in con.execute(
+        "SELECT basis b, COUNT(*) n FROM attempts WHERE outcome='correct' GROUP BY basis")})
     sid = current_session(con)
     if sid:
-        r = con.execute("SELECT COUNT(*) n, SUM(quality>=3) ok FROM attempts WHERE session_id=?", (sid,)).fetchone()
+        r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts WHERE session_id=?", (sid,)).fetchone()
         print(f"session {sid}: {r['n']} attempts, {r['ok'] or 0} correct")
     print("items total:", con.execute("SELECT COUNT(*) FROM items").fetchone()[0],
           " stage:", meta(con, "stage"))
@@ -670,7 +740,7 @@ def cmd_checkpoint(con, args):
     sid = current_session(con, create=True)
     last = con.execute("SELECT ts FROM checkpoints ORDER BY id DESC LIMIT 1").fetchone()
     since = last["ts"] if last else 0
-    r = con.execute("SELECT COUNT(*) n, SUM(quality>=3) ok FROM attempts WHERE ts>?", (since,)).fetchone()
+    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts WHERE ts>?", (since,)).fetchone()
     con.execute("INSERT INTO checkpoints(session_id,ts,summary,next_focus) VALUES(?,?,?,?)",
                 (sid, now_ts(), args.summary, args.next))
     con.execute("UPDATE sessions SET ended_ts=? WHERE id=?", (now_ts(), sid))
@@ -704,8 +774,10 @@ def main():
     sub.add_parser("resume")
     p = sub.add_parser("next"); p.add_argument("-n", type=int, default=1)
     p = sub.add_parser("grade"); p.add_argument("item_id", type=int); p.add_argument("answer", nargs="*")
-    p = sub.add_parser("record"); p.add_argument("item_id", type=int); p.add_argument("quality", type=int)
-    p.add_argument("--mode", default="jp"); p.add_argument("--answer", default=""); p.add_argument("--latency", type=float)
+    p = sub.add_parser("record"); p.add_argument("item_id", type=int); p.add_argument("outcome", choices=OUTCOMES)
+    p.add_argument("--mode", default="jp"); p.add_argument("--answer", default="")
+    p.add_argument("--confidence", choices=CONFIDENCES); p.add_argument("--basis", choices=BASES)
+    p.add_argument("--note")
     sub.add_parser("due")
     p = sub.add_parser("weak"); p.add_argument("--limit", type=int, default=10); p.add_argument("--detail", action="store_true")
     sub.add_parser("stats")

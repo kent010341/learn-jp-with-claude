@@ -7,8 +7,8 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 |---|---|
 | `resume` | 開新 session，顯示階段、上次 checkpoint 與 next_focus、到期數、弱點。**每次對話開頭必跑** |
 | `next [-n N]` | 取下一題（先到期且最易忘者，否則新題；盡量與上一題不同類型）。輸出不含答案 |
-| `grade <item_id> <使用者原文>` | 判分（含羅馬字轉換與容錯）→ result: correct/incorrect/unknown/ambiguous、建議 quality、回饋素材、可直接執行的 `record_cmd` |
-| `record <item_id> <quality 0-5> --mode jp\|romaji\|choice\|unknown --answer "<原文>"` | 寫入作答並更新該單元排程狀態 |
+| `grade <item_id> <使用者原文>` | 判分（含羅馬字轉換與容錯）→ result: correct/incorrect/unknown/ambiguous、`suggested_outcome`、回饋素材、可直接執行的 `record_cmd` |
+| `record <item_id> <correct\|incorrect\|skipped> --mode jp\|romaji\|choice\|unknown --answer "<原文>" [--confidence sure\|unsure\|guess] [--basis known\|intuition\|context\|assisted\|other] [--note "..."]` | 寫入作答並更新該單元排程狀態（列舉值意義見 `../rules/quiz-protocol.md`） |
 | `due` | 目前到期的單元與即將到期者 |
 | `weak [--detail]` | 弱點：lapses 多/穩定度低的單元、各類型近期答對率、最近錯誤 |
 | `stats` | 各 tier 數量、總答對、本 session 作答統計 |
@@ -32,7 +32,11 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 - `unit`：同一知識點的不同題型共用同一 unit（排程與「鞏固」判定以 unit 為單位）。
 - `format`：recognize＝選擇辨識；recall＝看日文答讀音/意思；produce＝看中文/情境答日文。
 - choice 題的 `answers` 必須出現在 `choices` 中；free 題的 `answers` 要列出全部可接受寫法（假名與漢字都要列）。
-- 判分的 quality：選擇題答對 3（可能猜中）、自由作答答對 4、錯但接近 2、錯 1、不知道 0；`ambiguous` 由你判斷後以 `record` 寫入。
+- 判分：`grade` 只建議 `outcome`；信心與依據由使用者自述決定（見 `../rules/quiz-protocol.md`）。`ambiguous` 由你判斷後以 `record` 寫入。
+- 選擇題選項在 `next` 顯示時隨機排列，顯示順序存於資料庫，`grade` 依顯示順序對照字母；種子檔不必打亂選項。
+- 資料庫 schema 版本 2：`attempts(outcome, confidence, basis, answer_mode, user_answer, note)`，不再有 quality 與 latency。
+  舊版（v1）資料庫在第一次執行任何指令時自動遷移並重算排程狀態。
+- `stats` 會列出答對依據的分佈（confidence、basis），分析語感與猜測比例時使用。
 
 ## 時間模擬（僅驗證用）
 `JL_NOW=2026-12-25T10:00` 可模擬時間；`JL_DB=<路徑>` 可指定暫時資料庫。不要在真實進度上使用 JL_NOW。

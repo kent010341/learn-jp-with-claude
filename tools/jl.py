@@ -2,7 +2,7 @@
 """日文反向學習專案 CLI（僅標準庫）。所有進度讀寫都經由這支程式。
 
 用法：python tools/jl.py <command> [...]
-指令：resume | next | grade | record | due | weak | stats | checkpoint | import | stage | rebuild | retire | init
+指令：resume | next | grade | record | due | weak | stats | checkpoint | import | stage | rebuild | retire | confusion | init
 環境變數：JL_NOW=<epoch 或 ISO 時間> 可模擬時間（驗證用）；JL_DB=<路徑>、JL_SEED=<目錄> 可指定資料庫與種子目錄（驗證用）。
 """
 import argparse
@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("JL_DB") or ROOT / "data" / "learning.db")
 SEED_DIR = Path(os.environ.get("JL_SEED") or ROOT / "curriculum" / "seed")
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 DEFAULT_META = {
     "schema_version": SCHEMA_VERSION,
@@ -110,6 +110,44 @@ CREATE TABLE IF NOT EXISTS checkpoints(
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_unit ON attempts(unit, ts);
 CREATE INDEX IF NOT EXISTS idx_items_unit ON items(unit);
+-- v3：混淆表（跨單元的對比型錯誤）。狀態不存，由 confusion_status view 衍生。
+CREATE TABLE IF NOT EXISTS confusions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('particle','request_form','politeness','false_friend','similar_form','other')),
+  cause TEXT NOT NULL CHECK(cause IN ('zh_transfer','overgeneralize','form_mixup','sound_mixup','unknown')),
+  axis TEXT NOT NULL CHECK(axis IN ('form','meaning','usage')),
+  gist TEXT NOT NULL CHECK(length(gist) <= 80),   -- 一行判斷線索；不存講解全文
+  pair_key TEXT NOT NULL UNIQUE,                  -- 成員 unit 排序後以 | 串接
+  miss_count INTEGER NOT NULL DEFAULT 1,
+  first_seen REAL NOT NULL, last_seen REAL NOT NULL,
+  taught_at REAL, taught_session INTEGER,
+  merged_into INTEGER REFERENCES confusions(id)
+);
+CREATE TABLE IF NOT EXISTS confusion_members(
+  confusion_id INTEGER NOT NULL REFERENCES confusions(id),
+  unit TEXT NOT NULL,
+  PRIMARY KEY(confusion_id, unit)
+);
+CREATE TABLE IF NOT EXISTS confusion_attempts(
+  confusion_id INTEGER NOT NULL REFERENCES confusions(id),
+  attempt_id INTEGER NOT NULL,
+  PRIMARY KEY(confusion_id, attempt_id)
+);
+CREATE INDEX IF NOT EXISTS idx_confusion_members_unit ON confusion_members(unit);
+CREATE INDEX IF NOT EXISTS idx_confusions_kind ON confusions(kind);
+CREATE INDEX IF NOT EXISTS idx_confusions_last_seen ON confusions(last_seen);
+CREATE VIEW IF NOT EXISTS confusion_status AS
+SELECT c.id AS id,
+  CASE
+    WHEN c.merged_into IS NOT NULL THEN 'merged'
+    WHEN c.taught_at IS NULL THEN 'observed'
+    WHEN NOT EXISTS(SELECT 1 FROM confusion_members m WHERE m.confusion_id=c.id) THEN 'drilling'
+    WHEN EXISTS(SELECT 1 FROM confusion_members m LEFT JOIN item_state s ON s.unit=m.unit
+                WHERE m.confusion_id=c.id AND COALESCE(s.tier,'new')!='consolidated') THEN 'drilling'
+    ELSE 'resolved'
+  END AS status
+FROM confusions c;
 """
 
 
@@ -142,6 +180,8 @@ def connect():
         con.execute("ALTER TABLE items ADD COLUMN retired TEXT")
     for k, v in DEFAULT_META.items():
         con.execute("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)", (k, v))
+    if int(meta(con, "schema_version") or 0) < int(SCHEMA_VERSION):  # v2 -> v3：新表已由 SCHEMA 建立
+        con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (SCHEMA_VERSION,))
     con.commit()
     if migrated:
         cmd_rebuild(con, None)
@@ -567,6 +607,8 @@ def cmd_next(con, args):
     due = con.execute("""SELECT s.unit, s.stability_days, s.last_ts FROM item_state s
                          WHERE s.due_ts<=? ORDER BY s.due_ts""", (ts,)).fetchall()
     due = sorted(due, key=lambda r: retr((ts - r["last_ts"]) / 86400, r["stability_days"]))
+    act_units = active_confusion_units(con)  # 進行中混淆的到期單元優先（穩定排序，其餘順序不變）
+    due = sorted(due, key=lambda r: r["unit"] not in act_units)
     seen = {r["unit"] for r in con.execute("SELECT unit FROM item_state")}
     new_units = [r["unit"] for r in con.execute(
         "SELECT unit, MIN(id) i FROM items WHERE stage<=? AND retired IS NULL GROUP BY unit ORDER BY i", (stage,)) if r["unit"] not in seen]
@@ -740,6 +782,11 @@ def cmd_resume(con, args):
     if n:
         args.limit, args.detail = 5, False
         cmd_weak(con, args)
+    act = con.execute("SELECT COUNT(*) FROM confusion_status WHERE status IN ('observed','drilling')").fetchone()[0]
+    if act:
+        print("== 進行中的混淆（observed＝尚未講解，drilling＝已講解待鞏固）")
+        args.action, args.status, args.kind, args.unit, args.untaught, args.limit = "list", None, None, None, False, 5
+        cmd_confusion(con, args)
 
 
 def cmd_checkpoint(con, args):
@@ -771,6 +818,101 @@ def cmd_import(con, args):
     import_file(con, args.file)
 
 
+# --------------------------------------------------------------------------- 混淆表
+CONF_KINDS = ("particle", "request_form", "politeness", "false_friend", "similar_form", "other")
+CONF_CAUSES = ("zh_transfer", "overgeneralize", "form_mixup", "sound_mixup", "unknown")
+CONF_AXES = ("form", "meaning", "usage")
+CONF_STATUSES = ("observed", "drilling", "resolved", "merged")
+
+
+def active_confusion_units(con):
+    """進行中混淆（已講解且未 resolved）所牽涉的 unit。"""
+    return {r["unit"] for r in con.execute(
+        """SELECT m.unit FROM confusion_members m JOIN confusion_status v ON v.id=m.confusion_id
+           WHERE v.status='drilling'""")}
+
+
+def cmd_confusion(con, args):
+    act = args.action
+    if act == "add":
+        units = sorted(set(args.members))
+        if len(units) < 2:
+            raise SystemExit("需要至少兩個不同的 unit 作為成員")
+        for u in units:
+            if not con.execute("SELECT 1 FROM items WHERE unit=?", (u,)).fetchone():
+                raise SystemExit(f"unit 不存在：{u}（成員必須對應既有 unit）")
+        if len(args.gist) > 80:
+            raise SystemExit("gist 超過 80 字：只存一行重點，不存講解全文")
+        for aid in args.attempt or []:
+            if not con.execute("SELECT 1 FROM attempts WHERE id=?", (aid,)).fetchone():
+                raise SystemExit(f"attempt 不存在：{aid}")
+        key = "|".join(units)
+        ts = now_ts()
+        row = con.execute("SELECT id, merged_into FROM confusions WHERE pair_key=?", (key,)).fetchone()
+        if row:
+            cid = row["merged_into"] or row["id"]
+            con.execute("UPDATE confusions SET miss_count=miss_count+1, last_seen=? WHERE id=?", (ts, cid))
+            verb = "updated"
+        else:
+            cur = con.execute(
+                """INSERT INTO confusions(label,kind,cause,axis,gist,pair_key,first_seen,last_seen)
+                   VALUES(?,?,?,?,?,?,?,?)""", (args.label, args.kind, args.cause, args.axis, args.gist, key, ts, ts))
+            cid = cur.lastrowid
+            con.executemany("INSERT INTO confusion_members(confusion_id,unit) VALUES(?,?)", [(cid, u) for u in units])
+            verb = "created"
+        for aid in args.attempt or []:
+            con.execute("INSERT OR IGNORE INTO confusion_attempts(confusion_id,attempt_id) VALUES(?,?)", (cid, aid))
+        con.commit()
+        print(f"{verb} confusion {cid}: {args.label}")
+    elif act == "taught":
+        n = con.execute("UPDATE confusions SET taught_at=?, taught_session=? WHERE id=? AND merged_into IS NULL",
+                        (now_ts(), current_session(con, create=True), args.id)).rowcount
+        con.commit()
+        print(f"taught {args.id}" if n else f"no active confusion {args.id}")
+    elif act == "merge":
+        if args.id == args.into:
+            raise SystemExit("不能併入自己")
+        a = con.execute("SELECT * FROM confusions WHERE id=? AND merged_into IS NULL", (args.id,)).fetchone()
+        b = con.execute("SELECT * FROM confusions WHERE id=? AND merged_into IS NULL", (args.into,)).fetchone()
+        if not a or not b:
+            raise SystemExit("來源或目標不存在或已被併入")
+        con.execute("UPDATE confusions SET merged_into=? WHERE id=?", (args.into, args.id))
+        con.execute("UPDATE confusions SET miss_count=miss_count+?, last_seen=MAX(last_seen,?) WHERE id=?",
+                    (a["miss_count"], a["last_seen"], args.into))
+        con.execute("INSERT OR IGNORE INTO confusion_attempts SELECT ?, attempt_id FROM confusion_attempts "
+                    "WHERE confusion_id=?", (args.into, args.id))
+        con.execute("INSERT OR IGNORE INTO confusion_members SELECT ?, unit FROM confusion_members "
+                    "WHERE confusion_id=?", (args.into, args.id))
+        con.commit()
+        print(f"merged {args.id} -> {args.into}")
+    elif act == "list":
+        q = "SELECT c.*, v.status FROM confusions c JOIN confusion_status v ON v.id=c.id WHERE 1=1"
+        params = []
+        if args.status:
+            q += " AND v.status=?"
+            params.append(args.status)
+        else:
+            q += " AND v.status!='merged'"
+        if args.kind:
+            q += " AND c.kind=?"
+            params.append(args.kind)
+        if args.unit:
+            q += " AND EXISTS(SELECT 1 FROM confusion_members m WHERE m.confusion_id=c.id AND m.unit=?)"
+            params.append(args.unit)
+        if args.untaught:
+            q += " AND c.taught_at IS NULL"
+        q += " ORDER BY c.miss_count DESC, c.last_seen DESC LIMIT ?"
+        params.append(args.limit)
+        rows = con.execute(q, params).fetchall()
+        print(f"confusions: {len(rows)}")
+        for r in rows:
+            mem = ",".join(x["unit"] for x in con.execute(
+                "SELECT unit FROM confusion_members WHERE confusion_id=? ORDER BY unit", (r["id"],)))
+            print(f"  [{r['id']}] {r['label']}  status={r['status']} kind={r['kind']} cause={r['cause']} "
+                  f"axis={r['axis']} miss={r['miss_count']}")
+            print(f"      gist: {r['gist']}   units: {mem}")
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -792,12 +934,25 @@ def main():
     p = sub.add_parser("stage"); p.add_argument("n", type=int, nargs="?")
     sub.add_parser("rebuild")
     p = sub.add_parser("retire"); p.add_argument("key"); p.add_argument("--reason", required=True)
+    p = sub.add_parser("confusion")
+    csub = p.add_subparsers(dest="action", required=True)
+    q = csub.add_parser("add"); q.add_argument("--label", required=True)
+    q.add_argument("--kind", required=True, choices=CONF_KINDS)
+    q.add_argument("--cause", default="unknown", choices=CONF_CAUSES)
+    q.add_argument("--axis", required=True, choices=CONF_AXES); q.add_argument("--gist", required=True)
+    q.add_argument("--members", nargs="+", required=True); q.add_argument("--attempt", type=int, nargs="*")
+    q = csub.add_parser("taught"); q.add_argument("id", type=int)
+    q = csub.add_parser("merge"); q.add_argument("id", type=int); q.add_argument("into", type=int)
+    q = csub.add_parser("list"); q.add_argument("--status", choices=CONF_STATUSES)
+    q.add_argument("--kind", choices=CONF_KINDS); q.add_argument("--unit")
+    q.add_argument("--untaught", action="store_true"); q.add_argument("--limit", type=int, default=20)
     args = ap.parse_args()
     con = connect()
     ensure_seeds(con)
     {"init": lambda c, a: print(f"ok. db={DB_PATH}"), "resume": cmd_resume, "next": cmd_next, "grade": cmd_grade,
      "record": cmd_record, "due": cmd_due, "weak": cmd_weak, "stats": cmd_stats, "checkpoint": cmd_checkpoint,
-     "import": cmd_import, "stage": cmd_stage, "rebuild": cmd_rebuild, "retire": cmd_retire}[args.cmd](con, args)
+     "import": cmd_import, "stage": cmd_stage, "rebuild": cmd_rebuild, "retire": cmd_retire,
+     "confusion": cmd_confusion}[args.cmd](con, args)
 
 
 if __name__ == "__main__":

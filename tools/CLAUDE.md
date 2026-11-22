@@ -16,6 +16,11 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `import <round.json>` | 匯入題目（以 key 去重；需先經 reviewer 通過） |
 | `stage [n]` | 查看／設定目前階段（新題只會從 stage <= n 抽） |
 | `rebuild` | 由 attempts 重算全部 item_state（修改門檻或模型後使用） |
+| `retire <key> --reason "..."` | 停用題目（不再出題，紀錄保留） |
+| `confusion add --label "..." --kind <k> [--cause <c>] --axis <a> --gist "<≤80字>" --members <unit> <unit>... [--attempt <id>...]` | 建立或累計混淆對（成員排序後去重；同組再加＝miss_count+1）。列舉值見 `../data/CLAUDE.md` |
+| `confusion taught <id>` | 標記已講解（只存重點 gist，不存講解全文） |
+| `confusion merge <id> <into>` | 併入重複的混淆（不刪除） |
+| `confusion list [--status observed\|drilling\|resolved\|merged] [--kind <k>] [--unit <u>] [--untaught]` | 查詢混淆；狀態由成員 unit 的 consolidated 衍生 |
 
 ## 題目 JSON 格式（seed 與 `data/rounds/*.json` 共用）
 ```json
@@ -34,11 +39,15 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 - choice 題的 `answers` 必須出現在 `choices` 中；free 題的 `answers` 要列出全部可接受寫法（假名與漢字都要列）。
 - 判分：`grade` 只建議 `outcome`；信心與依據由使用者自述決定（見 `../rules/quiz-protocol.md`）。`ambiguous` 由你判斷後以 `record` 寫入。
 - 選擇題選項在 `next` 顯示時隨機排列，顯示順序存於資料庫，`grade` 依顯示順序對照字母；種子檔不必打亂選項。
-- 資料庫 schema 版本 2：`attempts(outcome, confidence, basis, answer_mode, user_answer, note)`，不再有 quality 與 latency。
+- 資料庫 schema 版本 3（v2 加混淆表）；attempts 為 v2 格式：`attempts(outcome, confidence, basis, answer_mode, user_answer, note)`，不再有 quality 與 latency。
   舊版（v1）資料庫在第一次執行任何指令時自動遷移並重算排程狀態。
 - `stats` 會列出答對依據的分佈（confidence、basis），分析語感與猜測比例時使用。
 
 ## 時間模擬（僅驗證用）
 `JL_NOW=2026-12-25T10:00` 可模擬時間；`JL_DB=<路徑>` 可指定暫時資料庫。不要在真實進度上使用 JL_NOW。
+
+## 測試
+`python -X utf8 -m unittest discover -s tests -v`。測試以子程序呼叫 `jl.py`，使用暫存資料庫與種子（`JL_DB`、`JL_SEED`、`JL_NOW`），不碰真實進度。
+修改 `jl.py`（判分、排程、schema、指令）後必須跑過，新行為要補測試。
 
 相關：`../data/CLAUDE.md`、`../rules/quiz-protocol.md`。

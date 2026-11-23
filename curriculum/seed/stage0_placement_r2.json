@@ -6,8 +6,7 @@
    "key": "r2_yasai_read",
    "unit": "word_yasai",
    "kind": "word",
-   "qtype": "free",
-   "format": "recall",
+   "task": "reading",
    "prompt": "超市蔬果區的牌子寫著「野菜」，怎麼讀？（寫假名或羅馬拼音）",
    "answers": [
     "やさい",
@@ -26,8 +25,7 @@
    "key": "r2_atatame_reply",
    "unit": "phrase_atatame",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "便利商店買便當，店員說「あたためますか？」你要加熱，哪句回應最自然？",
    "choices": [
     "いただきます",
@@ -50,8 +48,7 @@
    "key": "r2_tegami_mean",
    "unit": "word_tegami",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "朋友說：「おばあちゃんから手紙（てがみ）がきたよ」。「手紙」是什麼？",
    "choices": [
     "衛生紙",
@@ -74,8 +71,7 @@
    "key": "r2_chotto_decline",
    "unit": "phrase_chotto",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "朋友問「今夜、ごはん行かない？」你聽到對方回「あー、今夜はちょっと…」，意思是？",
    "choices": [
     "委婉拒絕",
@@ -98,8 +94,7 @@
    "key": "r2_mochikaeri_produce",
    "unit": "phrase_mochikaeri",
    "kind": "phrase",
-   "qtype": "free",
-   "format": "produce",
+   "task": "translate",
    "prompt": "在速食店，店員問你內用或外帶，你想說「外帶」，日文怎麼說？",
    "answers": [
     "持ち帰りで",
@@ -137,8 +132,7 @@
    "key": "r2_reji_mean",
    "unit": "word_reji",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "在商場裡，你正在找地方，店員指著前方說「レジ、あちらです」，是指哪裡？",
    "choices": [
     "電梯",
@@ -161,8 +155,7 @@
    "key": "r2_otsuri_mean",
    "unit": "word_otsuri",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "付完錢，店員一邊遞東西給你一邊說「お釣り（おつり）です」，「お釣り」是什麼？",
    "answers": [
     "找零"
@@ -185,8 +178,7 @@
    "key": "r2_de_meet",
    "unit": "grammar_de",
    "kind": "grammar",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "LINE 約朋友：「あした、駅（　）会おう」空格填哪個助詞？",
    "choices": [
     "を",
@@ -209,8 +201,7 @@
    "key": "r2_tsuita_produce",
    "unit": "phrase_tsuita",
    "kind": "phrase",
-   "qtype": "free",
-   "format": "produce",
+   "task": "translate",
    "prompt": "朋友 LINE 問「今どこ？」你已經抵達了，想回「我到了」，日文怎麼回？",
    "answers": [
     "着いた",
@@ -247,8 +238,7 @@
    "key": "r2_osusume_mean",
    "unit": "word_osusume",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "居酒屋的菜單角落寫著「今日のおすすめ」，這是什麼？",
    "choices": [
     "本日特價",

@@ -6,8 +6,7 @@
    "key": "kana_nu_read",
    "unit": "kana_nu",
    "kind": "kana",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "「ぬ」要怎麼唸？",
    "choices": [
     "nu",
@@ -30,8 +29,7 @@
    "key": "word_deguchi_mean",
    "unit": "word_deguchi",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "車站指示牌上寫著「出口」，這是指哪個地方？",
    "choices": [
     "要出去時走的出口",
@@ -54,8 +52,7 @@
    "key": "phrase_fukuro_mean",
    "unit": "phrase_fukuro",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "便利商店結帳時，店員說「袋（ふくろ）はご利用（りよう）ですか？」是在問什麼？",
    "choices": [
     "問你要不要購物袋",
@@ -78,8 +75,7 @@
    "key": "kana_tsu_read",
    "unit": "kana_tsu",
    "kind": "kana",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "片假名「ツ」要怎麼唸？",
    "choices": [
     "tsu",
@@ -102,8 +98,7 @@
    "key": "grammar_toire_wa",
    "unit": "grammar_wa",
    "kind": "grammar",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "在車站問路：「トイレ（　）どこですか？」空格要填哪個助詞？",
    "choices": [
     "は",
@@ -126,8 +121,7 @@
    "key": "word_eigyochu_mean",
    "unit": "word_eigyochu",
    "kind": "word",
-   "qtype": "free",
-   "format": "recall",
+   "task": "meaning",
    "prompt": "咖啡店門口掛著「営業中（えいぎょうちゅう）」的牌子，是什麼意思？（用中文回答）",
    "answers": [
     "營業中",
@@ -151,8 +145,7 @@
    "key": "phrase_arigatou_mean",
    "unit": "phrase_arigatou",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "店員幫你把東西裝好遞給你，你想說「謝謝」，哪一句最合適？",
    "choices": [
     "ありがとう",
@@ -175,8 +168,7 @@
    "key": "kana_re_read",
    "unit": "kana_re",
    "kind": "kana",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "「れ」要怎麼唸？",
    "choices": [
     "re",
@@ -199,8 +191,7 @@
    "key": "word_kinen_mean",
    "unit": "word_kinen",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "餐廳門口貼著「禁煙（きんえん）」，是什麼意思？",
    "choices": [
     "禁止吸菸",
@@ -223,8 +214,7 @@
    "key": "phrase_ikura_mean",
    "unit": "phrase_ikura",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "在商店，客人拿起商品問店員「これ、いくらですか？」，他在問什麼？",
    "choices": [
     "這個多少錢",
@@ -247,8 +237,7 @@
    "key": "grammar_kore_wo",
    "unit": "grammar_wo",
    "kind": "grammar",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "在店裡指著商品說：「これ（　）ください」。空格填哪個助詞？",
    "choices": [
     "を",
@@ -271,8 +260,7 @@
    "key": "word_deguchi_read",
    "unit": "word_deguchi",
    "kind": "word",
-   "qtype": "free",
-   "format": "recall",
+   "task": "reading",
    "prompt": "車站看板上的「出口」怎麼讀？（寫假名或羅馬拼音）",
    "answers": [
     "でぐち",
@@ -293,8 +281,7 @@
    "key": "kana_so_read",
    "unit": "kana_so",
    "kind": "kana",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "片假名「ソ」要怎麼唸？",
    "choices": [
     "so",
@@ -317,8 +304,7 @@
    "key": "phrase_daijoubu_mean",
    "unit": "phrase_daijoubu",
    "kind": "phrase",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "店員問「お箸（はし）はいりますか？」你回「大丈夫です（だいじょうぶです）」，意思是什麼？",
    "choices": [
     "不用了",
@@ -341,8 +327,7 @@
    "key": "word_omizu_mean",
    "unit": "word_omizu",
    "kind": "word",
-   "qtype": "free",
-   "format": "recall",
+   "task": "meaning",
    "prompt": "餐廳店員說「お水（おみず）」，指的是什麼？（用中文回答）",
    "answers": [
     "水",
@@ -366,8 +351,7 @@
    "key": "grammar_doko_ni",
    "unit": "grammar_ni",
    "kind": "grammar",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "LINE 訊息問朋友：「今（いま）どこ（　）いる？」空格填哪個助詞？",
    "choices": [
     "に",
@@ -390,8 +374,7 @@
    "key": "phrase_arigatou_produce",
    "unit": "phrase_arigatou",
    "kind": "phrase",
-   "qtype": "free",
-   "format": "produce",
+   "task": "translate",
    "prompt": "店員把找零遞給你，你想說「謝謝」，用日文怎麼說？",
    "answers": [
     "ありがとう",
@@ -419,8 +402,7 @@
    "key": "word_eki_read",
    "unit": "word_eki",
    "kind": "word",
-   "qtype": "free",
-   "format": "recall",
+   "task": "reading",
    "prompt": "旅行時看到看板上的「駅」，怎麼讀？（寫假名或羅馬拼音）",
    "answers": [
     "えき",
@@ -439,8 +421,7 @@
    "key": "phrase_ikura_produce",
    "unit": "phrase_ikura",
    "kind": "phrase",
-   "qtype": "free",
-   "format": "produce",
+   "task": "translate",
    "prompt": "在商店想問價錢「這個多少錢？」，日文怎麼說？",
    "answers": [
     "いくらですか",
@@ -471,8 +452,7 @@
    "key": "word_hiku_mean",
    "unit": "word_hiku",
    "kind": "word",
-   "qtype": "choice",
-   "format": "recognize",
+   "task": "choice",
    "prompt": "店門把手上貼著「引（ひく）」，要怎麼開門？",
    "choices": [
     "拉",

@@ -7,7 +7,7 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | 指令 | 用途 |
 |---|---|
 | `resume [--hook] [--source startup\|resume\|clear\|compact]` | 顯示階段、checkpoint、到期、弱點、混淆、題庫缺口。由 SessionStart hook 自動執行；compact／resume 沿用同一 session，其餘開新 session |
-| `next [-n N]` | 出下一題並建立 `presentation`（到期且最易忘者優先，進行中混淆優先；否則新題；自動交錯類型與題型）。輸出不含答案 |
+| `next [-n N] [--new-round]` | 出下一題並建立 `presentation`（到期且最易忘者優先，進行中混淆優先；否則新題；自動交錯類型與題型）。輸出不含答案。本輪達 `round_max` 題回 `ROUND_LIMIT`；手動 checkpoint 後回 `ROUND_CLOSED`，使用者明確說繼續才加 `--new-round` |
 | `present <item_key>` | 指定某題出題（重考用） |
 | `answer <presentation> "<原文>" [--confidence ..] [--basis ..] [--outcome ..] [--tags t1,t2] [--pick "<選項>"] [--note ".."]` | 判分並寫入。能確定時直接寫入；`NEEDS_JUDGMENT` 時不寫入，判斷後加 `--outcome`（答錯加 `--tags`）再執行一次。同一 presentation 只能作答一次 |
 | `report [--attempt id] [--confidence ..] [--basis ..] [--note ..] [--phase after_feedback\|with_answer]` | 補記使用者自述（預設最後一筆、after_feedback）；另存一列，排程依最新自述重算 |
@@ -25,7 +25,7 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 ## 維護
 | 指令 | 用途 |
 |---|---|
-| `checkpoint --summary ".." --next ".."` / `checkpoint --auto` | 手動 checkpoint；`--auto` 由資料庫產生摘要（PreCompact hook 使用，無新作答則不寫入） |
+| `checkpoint --summary ".." --next ".."` / `checkpoint --auto` | 手動 checkpoint＝結束一輪（關閉本輪）；`--auto` 由資料庫產生摘要、不關閉本輪（PreCompact hook 使用，無新作答則不寫入） |
 | `import <round.json>` | 匯入題目（以 key 去重；需先經 reviewer 通過；未知題型會被拒絕） |
 | `task add <name> --skill comprehend\|produce --grading auto\|auto_then_judge\|judge --desc ".."` / `task list` | 新增／列出題型 |
 | `unit set <unit> [--gist ..] [--label ..] [--add-skill ..]` | 修改 unit 重點或宣告 skill |

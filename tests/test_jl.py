@@ -314,6 +314,40 @@ class TestNext(Base):
         self.assertEqual(keys, ["e_long2"])
 
 
+class TestRound(Base):
+    def test_manual_checkpoint_closes_round_until_new_round(self):
+        self.answer("e_long", "おおきい")
+        out = self.jl("checkpoint", "--summary", "s", "--next", "n").stdout
+        self.assertIn("ROUND_CLOSED", out)
+        out = self.jl("next").stdout
+        self.assertTrue(out.startswith("ROUND_CLOSED"))
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM presentations")[0][0], 1)  # 沒有出新題
+        out = self.jl("next", "--new-round").stdout
+        self.assertIn("round: 已作答 0/20", out)
+        self.assertIn("presentation:", out)
+        self.assertIn("presentation:", self.jl("next").stdout)  # 開新一輪後不必再加旗標
+
+    def test_auto_checkpoint_does_not_close_round(self):
+        self.answer("e_long", "おおきい")
+        self.jl("checkpoint", "--auto", now="2026-01-01T11:00")
+        self.assertIn("presentation:", self.jl("next", now="2026-01-01T11:05").stdout)
+
+    def test_round_limit(self):
+        self.sql("UPDATE meta SET value='2' WHERE key='round_max'")
+        out = self.jl("next", "-n", 5).stdout
+        self.assertEqual(out.count("presentation:"), 2)  # -n 不會超過剩餘題數
+        self.answer("e_long", "おおきい")
+        self.answer("b_free", "これをください")
+        out = self.jl("next").stdout
+        self.assertTrue(out.startswith("ROUND_LIMIT"))
+        self.jl("checkpoint", "--summary", "s")
+        self.assertIn("presentation:", self.jl("next", "--new-round").stdout)
+
+    def test_resume_shows_round_state(self):
+        self.jl("checkpoint", "--summary", "s")
+        self.assertIn("本輪：已結束", self.jl("resume").stdout)
+
+
 class TestImportAndTasks(Base):
     def write(self, data, name="r.json"):
         f = Path(self.tmp.name) / name

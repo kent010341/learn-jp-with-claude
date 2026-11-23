@@ -37,6 +37,8 @@ DEFAULT_META = {
     "cons_min_stability": "60",    # 鞏固：穩定度需 >= 此天數
     "learn_step_min": "10",        # 答錯後最快幾分鐘再出現
     "day_start_hour": "4",         # 學習日的日界（此時刻前算前一天：中間要經過睡眠才算隔天）
+    "round_max": "20",             # 一輪最多作答題數：達到後 next 不再出題，須 checkpoint 並停下
+    "round_closed": "0",           # 手動 checkpoint 會關閉本輪；使用者明確說繼續後才以 next --new-round 開新一輪
 }
 
 # 排程模型常數：FSRS 風格的簡化版，初始值未經個人資料擬合
@@ -1003,8 +1005,28 @@ def last_shown(con):
     return (r["kind"], r["task"]) if r else (None, None)
 
 
+def round_count(con):
+    """本輪（上一個手動 checkpoint 之後）已作答題數。"""
+    last = con.execute("SELECT ts FROM checkpoints WHERE kind='manual' ORDER BY id DESC LIMIT 1").fetchone()
+    return con.execute("SELECT COUNT(*) FROM attempts WHERE ts>?", (last["ts"] if last else 0,)).fetchone()[0]
+
+
 def cmd_next(con, args):
     ts = now_ts()
+    if meta(con, "round_closed") == "1":
+        if not args.new_round:
+            print("ROUND_CLOSED: 上一輪已在 checkpoint 結束。不要出題：先向使用者回報並等待指示。"
+                  "使用者明確說要繼續／開始下一輪後，才執行 `next --new-round`。"
+                  "若 checkpoint 的 next_focus 需要新題，先走 generator → reviewer → import。")
+            return
+        set_meta(con, "round_closed", "0")
+        con.commit()
+    done, cap = round_count(con), int(meta(con, "round_max"))
+    if done >= cap:
+        print(f"ROUND_LIMIT: 本輪已作答 {done} 題（上限 {cap}）。停止出題：做手動 checkpoint、回報結果，等使用者指示。")
+        return
+    args.n = min(args.n, cap - done)
+    print(f"round: 已作答 {done}/{cap}")
     pairs = candidate_pairs(con, ts)
     last_kind, last_task = last_shown(con)
     sid = current_session(con, create=True)
@@ -1244,7 +1266,11 @@ def cmd_resume(con, args):
     ng = con.execute("SELECT COUNT(*) FROM v_skill_gaps").fetchone()[0]
     if nv or ng:
         print(f"題庫：需要新情境變體 {nv} 組（jl.py variants）、缺題的 skill {ng} 組")
-    print("流程：next → answer <presentation> \"<作答>\"（NEEDS_JUDGMENT 時判斷後加 --outcome --tags）→ 回饋 → 有自述就 report")
+    closed = meta(con, "round_closed") == "1"
+    print(f"本輪：{'已結束（等使用者說開始／繼續才用 next --new-round）' if closed else f'進行中，已作答 {round_count(con)}'}"
+          f"／上限 {meta(con, 'round_max')} 題")
+    print("流程：next → answer <presentation> \"<作答>\"（NEEDS_JUDGMENT 時判斷後加 --outcome --tags）→ 回饋 → 有自述就 report。"
+          "一輪結束（手動 checkpoint 或 ROUND_LIMIT）即停止出題，回報後等使用者指示；next_focus 需要新題時先走 generator 流程。")
 
 
 def auto_summary(con, since):
@@ -1293,8 +1319,12 @@ def cmd_checkpoint(con, args):
     con.execute("INSERT INTO checkpoints(session_id,ts,kind,summary,next_focus) VALUES(?,?,?,?,?)",
                 (sid, now_ts(), kind, summary, nxt))
     con.execute("UPDATE sessions SET ended_ts=? WHERE id=?", (now_ts(), sid))
+    if kind == "manual":
+        set_meta(con, "round_closed", "1")
     con.commit()
     print(f"checkpoint ({kind}) saved (session {sid}). 自上次 checkpoint：{r['n']} 題，答對 {r['ok'] or 0}。")
+    if kind == "manual":
+        print("ROUND_CLOSED: 本輪已結束。停止出題，回報答對率、錯最多的類型與下一輪建議，等使用者明確說繼續。")
 
 
 def cmd_variants(con, args):
@@ -1535,6 +1565,7 @@ def build_parser():
     p.add_argument("--hook", action="store_true", help="由 SessionStart hook 呼叫（從 stdin 讀 source）")
     p.add_argument("--source", choices=("startup", "resume", "clear", "compact"))
     p = sub.add_parser("next"); p.add_argument("-n", type=int, default=1)
+    p.add_argument("--new-round", action="store_true", help="使用者明確說要繼續後，開新一輪")
     p = sub.add_parser("present"); p.add_argument("key")
     p = sub.add_parser("answer"); p.add_argument("presentation_id", type=int); p.add_argument("answer", nargs="*")
     p.add_argument("--outcome", choices=OUTCOMES); p.add_argument("--tags")

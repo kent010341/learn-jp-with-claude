@@ -5,7 +5,9 @@
 - **SessionStart hook** 在開新對話與 compact 後自動執行 `jl.py resume --hook`，把學習狀態注入 context；compact 時沿用同一個 session。
 
 ## 手動 checkpoint（AI 判斷的內容資料庫算不出來，仍要寫）
-符合任一即做：一輪結束／換階段、subagent 結果匯入後、使用者要休息或結束、約每 10 題。
+手動 checkpoint ＝ **結束一輪**：寫入後本輪關閉，`next` 要等使用者明確說繼續、以 `next --new-round` 才會再出題（見 quiz-protocol.md「回合結構」）。
+符合任一即做：一輪結束（含 `ROUND_LIMIT`）、換階段、subagent 結果匯入後、使用者要休息或結束。
+一輪中途不做手動 checkpoint；中途的保存由 PreCompact hook 的 `--auto` 處理。
 ```
 python tools/jl.py checkpoint --summary "<摘要>" --next "<下一步焦點>"
 ```

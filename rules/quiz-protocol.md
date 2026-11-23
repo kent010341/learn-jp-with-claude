@@ -54,5 +54,13 @@
 - 不批評、不泛泛打氣；簡短。
 
 ## 回合結構
-- 一輪約 10–20 題。每輪結束做手動 checkpoint（見 compaction.md）。
-- 一輪結束報告：答對率、錯最多的類型、下一輪建議；不要逐題重述。
+- 一輪約 15–20 題（上限由 `meta.round_max` 控制，預設 20；`next` 輸出 `round: 已作答 N/20`）。
+- **一輪結束就停止出題**。結束的時機：題數到了、`next` 回報 `ROUND_LIMIT`、題庫沒有題（`NO_ITEMS`），或使用者要休息。
+  1. 做手動 checkpoint（見 compaction.md）；checkpoint 會關閉本輪。
+  2. 報告：答對率、錯最多的類型、下一輪建議；不要逐題重述。
+  3. **停下，等使用者明確說「繼續」「下一輪」之類**才再出題，再出題時用 `next --new-round`。
+     關閉後的 `next` 會回 `ROUND_CLOSED` 且不出題，不要自行加 `--new-round` 繞過。
+     新對話裡使用者說「開始練習」就算明確指示。
+- **下一輪需要新題時先備題**：checkpoint 的 next_focus 要求新題或新情境變體時，開新一輪前先告訴使用者，
+  走 generator → reviewer → import（見 subagent-policy.md），匯入後再開始。不得用繼續抽舊題庫代替。
+  只是到期複習、不需要新題時，可直接開新一輪。

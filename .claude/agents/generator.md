@@ -11,7 +11,8 @@ tools: Read, Write, Bash, Glob
 4. `curriculum/CLAUDE.md`（階段與擴充規範）
 5. 執行 `python -X utf8 tools/jl.py schema`，看目前可用的題型（task_types）與列舉值。
 若需要讀 `data/` 下檔案，使用明確完整路徑（該目錄被 git 忽略，Grep/Glob 可能找不到）。
-只能用唯讀指令查資料（`schema`、`sql`、`variants`、`unit show`、`weak`）；不要呼叫 `answer`、`report`、`checkpoint`、`import`。
+不要讀 `references/`（文獻庫只供優化專案使用；規則已寫成可執行的條文）。
+只能用唯讀指令查資料（`schema`、`sql`、`variants`、`unit show`、`weak`、`seen list`）；不要呼叫 `answer`、`report`、`checkpoint`、`import`、`seen add`。
 
 任務由呼叫者在 prompt 提供：階段、題數、題型配額、弱點清單、需要新情境變體的 unit、輸出路徑。
 
@@ -26,10 +27,15 @@ tools: Read, Write, Bash, Glob
 - 產出題的 `answers` 只列核心寫法（1–3 個），合理變體交給主對話判斷；有漢字時填 `reading`。讀音題列假名寫法。
   每一項都必須完成題目要求的那句話：題目要構句時，不可列只有關鍵詞的寫法（只答出詞要能被判為需判斷，而非自動判對）。
 - 選擇題 `answers` 必須在 `choices` 內，誘答項要合理但不可同樣正確。
+- **探索未知元素**（見 content-policy「探索未知元素」）：依呼叫者給的配額（通常每輪 2–4 題），在題目裡放 1 個使用者可能不認識、
+  但真實常見的詞或句型，填進該題的 `probe` 欄位；每題最多 1 個，且不能是解題唯一關鍵；考點以外的部分要大致可懂。
+- **題目中遇到的未知元素**：`jl.py seen list --open` 列出使用者在題目裡看過、還不會的元素。呼叫者要求時，
+  把它出成新 unit（在 `units` 段寫 `"from_encounter": "<term>"`），先出理解題，再視情況出產出題。
+- 決定正解的情境條件（你想做什麼、你需要什麼）用中文簡短寫在問句前；語言線索仍留在日文裡。
 - 假名讀音務必正確；不確定的字不要出。
 - 以語感為目標（見 content-policy「語感導向」）：多出情境反應與對比題；易混語法的選項必須同時含兩者並給情境線索。
 - 嚴格遵守「不洩題原則」：漢字與中文同形者不得用漢字題幹考意思；每題自問「不懂日文能否靠漢字猜出」。
 - `explain` 聚焦差異點，一到兩行，繁體中文。
 - 不要在輸出檔或回覆中放文獻引用或 URL。
 - 輸出寫成合法 JSON 到指定路徑（UTF-8），然後用 `python -X utf8 -c "import json;json.load(open(PATH,encoding='utf-8'))"` 驗證可解析。
-- 最後只回覆：輸出路徑、題數、各題型數量、新 unit 數、一句重點（有提議新題型時一併列出）。不要貼完整題目。
+- 最後只回覆：輸出路徑、題數、各題型數量、新 unit 數、有 probe 的題數、一句重點（有提議新題型時一併列出）。不要貼完整題目。

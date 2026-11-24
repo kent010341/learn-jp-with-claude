@@ -20,7 +20,9 @@
 - 使用者用羅馬拼音作答時，一律視為日文作答，**回覆中不得提及「羅馬拼音」或「你輸入的是…」之類說明**（見 `rules/input-policy.md`）。
 - 進度資料不得手改；`data/` 內容由 git 忽略，不屬於專案原始碼。查詢用 `jl.py sql`（唯讀）。
 - 本專案以一次性工作交給 subagent（出題、審題、批次分析），主對話只保留出題—作答—回饋（見 `rules/subagent-policy.md`）。
-- 專案檔案（規則、題庫、CLAUDE.md、subagent 定義）內不寫文獻引用或 URL。
+- 專案檔案（規則、題庫、CLAUDE.md、subagent 定義）內不寫文獻引用或 URL；**唯一例外是 `references/`**。
+- `references/` 是優化專案用的文獻庫（重點摘要＋citation）：**不在必讀清單，測驗階段（出題、作答、回饋、subagent 備題／審題／分析）禁止讀取**。
+  只有在優化規則、排程或設計時才讀；優化時新查的文獻依 `references/README.md` 的格式 append。
 
 ## 讀取被 git 忽略的檔案
 `data/` 被 .gitignore 忽略，Grep/Glob 可能掃不到。進度資料一律透過 `python tools/jl.py ...` 取得；

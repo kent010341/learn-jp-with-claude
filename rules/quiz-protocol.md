@@ -12,21 +12,41 @@
 1. `python tools/jl.py next` 取得下一題：輸出 `presentation`（這次出題的 id）、題型 `task`、題幹與選項（已隨機排列）。不含答案。
    要重考特定題目時用 `jl.py present <item_key>`。
 2. 向使用者出題：只呈現題幹（日文附假名）與選項。一次一題。
-3. 使用者作答後執行 `python tools/jl.py answer <presentation> "<使用者原文>"`，使用者同時有自述就加 `--confidence`／`--basis`。
+   `next` 輸出的 `probe:` 行是刻意放入的未知元素，**只供你參考，不要提示使用者**，也不要替它加中文註解。
+3. 使用者作答後執行 `python tools/jl.py answer <presentation> "<使用者原文>"`，
+   使用者同時有自述就加 `--confidence`／`--basis`／`--miss`。
    - 程式能確定對錯時（選擇題、讀音、完全符合核心答案、不知道）**直接寫入**，並輸出回饋素材與排程狀態。
    - 輸出 `NEEDS_JUDGMENT` 時**尚未寫入**：由你依自然度判斷，再執行一次並加 `--outcome correct|incorrect`，答錯時加 `--tags`。
      產出題（情境回應、翻譯、排序、挖空）只列核心答案，合理變體由你判斷可接受；意思題的中文說法也由你判斷。
      選擇題若無法辨認選了哪個，加 `--pick "<選項原文>"`。
    - 輸出 `CONFUSION_CANDIDATE` 表示選到另一個 unit 的誘答項，依下方「混淆對」決定是否建立。
 4. 依回饋素材（正解、explain、gist）回饋。
-5. **使用者在看完回饋後才補充**「其實是猜的」「是看前後文」等，執行 `python tools/jl.py report --confidence ..|--basis ..|--note "..."`（預設對最後一筆）。
+5. **使用者在看完回饋後才補充**「其實是猜的」「是看前後文」「是粗心漏看」等，
+   執行 `python tools/jl.py report --confidence ..|--basis ..|--miss ..|--note "..."`（預設對最後一筆）。
    自述另存一列、不改原作答，排程會依最新自述重算。
+
+## 題目裡看到不認識的東西
+「不會」有兩種，處理不同：
+- **答不出考點本身**：就是一般的答錯或跳過，照常回饋，**不另外記錄**。
+- **看不懂題目裡的某個詞或句型**（題幹、選項、店員台詞；不論最後答對答錯）：執行
+  `jl.py seen add --term "<詞>" --kind word|grammar|expression --attempt <id> [--where prompt|choice] [--reading ..] [--zh ..]`。
+  - 這是發現缺漏，**不得說成題目的問題**，也不說成使用者的失敗；回饋時用一兩行說明那個詞，不展開成講義。
+  - 只在使用者答錯相關、或主動問到時才說明；答對且沒問就只記錄、不講解（仍守「先測驗再講解」）。
+  - 記錄後會出現在 `resume`／`variants`，由 generator 出成新 unit 來測。
+- **整題看不懂**、無法對考點作答（使用者自述）：
+  - 先讓使用者照常嘗試或說不懂，然後**立即**給整句翻譯與一兩個關鍵點，當作一次讀懂的範例，不當成測驗。
+  - `answer`（或 `report`）加 `--miss unreadable`：這次不算考點的失誤，也不算進步。
+  - 用 `seen add` 記下最關鍵的 1–3 個未知元素（不必逐詞），再 `jl.py item park <key> --reason too_hard`，暫停這題。
+  - 回饋時說「這題現在超出範圍，已記下要補的東西」，不逐詞上課。
+  - 暫停的題目列在 `v_parked`；那些未知元素升格成 unit 並有進展後，由優化或備題流程 `item unpark`，放回來延後再測。
 
 ## 作答紀錄的維度
 - `outcome`：`correct`／`incorrect`／`skipped`。
 - `confidence`（使用者自述才填）：`sure`／`unsure`（不確定）／`guess`（猜的）。
 - `basis`（使用者自述才填）：`known`（真的會）／`intuition`（語感直覺）／`context`（由前後文推測）／
   `assisted`（被洩題或被提示，非自行想出）／`other`（細節寫 `--note`）。
+- `miss`（答錯原因，使用者自述才填）：`slip`（粗心、漏看條件、手滑）／`probe`（卡在題目裡看不懂的部分，而非考點）／
+  `unreadable`（整題看不懂）。不從答案推論，也不從作答時間推論。
 - 自述的時機 `phase`：與作答一起說＝`with_answer`；看完回饋後才說＝`after_feedback`（可信度不同，分開保存）。
 - 錯誤 `tags`（答錯時由你判斷，可多個，逗號分隔）：
   `particle` 助詞｜`conjugation` 活用／變化｜`vocab` 用錯或不會的詞｜`kana_form` 假名字形／讀音混淆｜
@@ -34,6 +54,8 @@
   `unnatural` 文法對但不自然｜`omission` 漏掉必要成分｜`meaning` 意思理解錯｜`other`。
 - 排程如何看待（由 `jl.py` 計算，不要自行換算）：
   - 答錯、`skipped`：算失誤。
+  - 答錯但 `miss` 為 `slip` 或 `probe`：**輕度失誤**，穩定度小降、不計 lapse，約一天內重測。
+  - 答錯或跳過且 `miss=unreadable`：**無證據**，不加不扣（題目沒量到考點）。
   - 答對但 `guess`，或依據為 `context`／`assisted`／`other`：**無證據**，不加穩定度、不算失誤，約一天內再測。
   - 答對但 `unsure`：弱證據，穩定度只小幅增加，不計入「鞏固」所需的成功日。
   - 其餘答對：一般證據。
@@ -52,6 +74,7 @@
 - 一到兩行：**差異點**——使用者答案和正解差在哪。聚焦差異，不展開整段文法講義。
 - 如有，附一個**真實場景片段**（符合 content-policy）。
 - 不批評、不泛泛打氣；簡短。
+- 使用者沒看懂題目裡的詞時，不把它說成「題目太難」「題目有問題」；那是找到的缺漏（見上方「題目裡看到不認識的東西」）。
 
 ## 回合結構
 - 一輪約 15–20 題（上限由 `meta.round_max` 控制，預設 20；`next` 輸出 `round: 已作答 N/20`）。

@@ -491,9 +491,9 @@ class TestMigrationV3(Base):
         con.commit()
         con.close()
         r = self.jl("stats")
-        self.assertIn("v3 -> v4", r.stderr)
+        self.assertIn("v3 -> v5", r.stderr)
         self.assertTrue((self.db.parent / "learning.v3.bak.db").exists())
-        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'")[0][0], "4")
+        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'")[0][0], "5")
         self.assertEqual(self.sql("SELECT value FROM meta WHERE key='stage'")[0][0], "1")
         self.assertEqual(self.sql("SELECT COUNT(*) FROM meta WHERE key LIKE 'shown:%'")[0][0], 0)
         tasks = {r["key"]: r["task"] for r in self.sql("SELECT key, task FROM items")}
@@ -513,6 +513,143 @@ class TestMigrationV3(Base):
         self.assertEqual(len(before), 3)
         self.jl("rebuild")
         self.assertEqual(before, [tuple(r) for r in self.sql(q)])
+
+
+class TestMigrationV4(Base):
+    def test_v4_migrates_to_v5(self):
+        """用 git 歷史中的 v4 版 jl.py 建立 v4 資料庫，再以目前版本遷移。"""
+        r = subprocess.run(["git", "show", "20af960:tools/jl.py"], cwd=ROOT, capture_output=True)
+        if r.returncode:
+            self.skipTest("git 歷史中找不到 v4 版 jl.py")
+        old = Path(self.tmp.name) / "jl_v4.py"
+        old.write_bytes(r.stdout)
+        self.db.unlink()
+        env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(self.seed), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
+        seed_v4 = Path(self.tmp.name) / "seed4"
+        seed_v4.mkdir()
+        items = [{k: v for k, v in it.items()} for it in SEED["items"] if "probe" not in it]
+        (seed_v4 / "t.json").write_text(json.dumps(dict(SEED, items=items), ensure_ascii=False), encoding="utf-8")
+        env["JL_SEED"] = str(seed_v4)
+
+        def old_jl(*a):
+            p = subprocess.run([sys.executable, "-X", "utf8", str(old), *map(str, a)], capture_output=True,
+                               text=True, encoding="utf-8", env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return p.stdout
+        out = old_jl("present", "e_long")
+        pid = int(out.split("presentation: ")[1].split()[0])
+        old_jl("answer", pid, "おおきい", "--confidence", "unsure")
+        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'")[0][0], "4")
+        r = self.jl("stats")
+        self.assertIn("v4 -> v5", r.stderr)
+        self.assertTrue((self.db.parent / "learning.v4.bak.db").exists())
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM attempts")[0][0], 1)
+        self.assertEqual(self.sql("SELECT confidence FROM v_attempt_effective")[0][0], "unsure")
+        cols = {r["name"] for r in self.sql("PRAGMA table_info(attempt_reports)")}
+        self.assertIn("miss", cols)
+        self.assertIn("probe", {r["name"] for r in self.sql("PRAGMA table_info(items)")})
+        self.assertEqual(self.sql("SELECT n FROM unit_stats WHERE unit='u_e'")[0][0], 1)
+
+
+class TestMissReasons(Base):
+    def setUp(self):
+        super().setUp()
+        self.answer("e_long", "おおきい", now="2026-01-01T10:00")
+        self.s1 = self.state("u_e")["stability_days"]
+
+    def test_slip_is_light_miss(self):
+        self.answer("e_long", "おきい", "--miss", "slip", now="2026-01-02T10:00")
+        st = self.state("u_e")
+        self.assertEqual(st["lapses"], 0)
+        self.assertAlmostEqual(st["stability_days"], self.s1 * 0.85)
+        self.assertLessEqual(st["due_ts"] - datetime_ts("2026-01-02T10:00"), 86400 + 1)
+        self.assertEqual(self.sql("SELECT n_slip FROM unit_stats WHERE unit='u_e'")[0][0], 1)
+        q = "SELECT * FROM unit_state ORDER BY unit, skill"
+        before = [tuple(r) for r in self.sql(q)]
+        self.jl("rebuild")
+        self.assertEqual(before, [tuple(r) for r in self.sql(q)])
+
+    def test_plain_miss_hurts_more_than_slip(self):
+        self.answer("e_long", "おきい", now="2026-01-02T10:00")
+        st = self.state("u_e")
+        self.assertEqual(st["lapses"], 1)
+        self.assertLess(st["stability_days"], self.s1 * 0.85)
+
+    def test_report_slip_after_feedback(self):
+        self.answer("e_long", "おきい", now="2026-01-02T10:00")
+        before = [tuple(r) for r in self.sql("SELECT * FROM attempts")]
+        self.jl("report", "--miss", "slip", "--note", "漏看條件", now="2026-01-02T10:01")
+        self.assertEqual(before, [tuple(r) for r in self.sql("SELECT * FROM attempts")])
+        self.assertEqual(self.state("u_e")["lapses"], 0)
+        self.assertEqual(self.sql("SELECT miss FROM v_attempt_effective ORDER BY id DESC LIMIT 1")[0][0], "slip")
+
+    def test_unreadable_is_no_evidence(self):
+        self.answer("e_long", "おきい", "--miss", "unreadable", now="2026-01-02T10:00")
+        st = self.state("u_e")
+        self.assertEqual(st["lapses"], 0)
+        self.assertAlmostEqual(st["stability_days"], self.s1)
+
+    def test_miss_on_correct_has_no_effect(self):
+        self.answer("e_long", "おおきい", "--miss", "slip", now="2026-01-02T10:00")
+        self.assertEqual(self.state("u_e")["reps_success"], 2)
+
+    def test_miss_check_constraint(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.sql("INSERT INTO attempt_reports(attempt_id,ts,phase,miss) VALUES(1,0,'with_answer','lazy')")
+
+
+class TestEncountersAndPark(Base):
+    def test_seen_add_dedupes_and_links(self):
+        self.answer("e_long", "おおきい")
+        self.answer("b_free", "これをください")
+        a1, a2 = [r[0] for r in self.sql("SELECT id FROM attempts ORDER BY id")]
+        out = self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a1).stdout
+        self.assertIn("created", out)
+        self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a1)  # 同一次不重複計
+        self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a2, "--where", "choice")
+        r = self.sql("SELECT * FROM v_encounters")[0]
+        self.assertEqual((r["seen_count"], r["status"]), (2, "open"))
+        self.assertIn(f"{a2}:choice", r["attempts"])
+        self.assertIn("お召し上がり", self.jl("resume").stdout)
+        self.jl("seen", "link", "お召し上がり", "u_a")
+        self.assertEqual(self.sql("SELECT status FROM v_encounters")[0][0], "linked")
+        self.assertNotEqual(self.jl("seen", "add", "--term", "x", "--kind", "word", "--attempt", 999,
+                                    ok=False).returncode, 0)
+
+    def test_import_probe_and_from_encounter(self):
+        self.answer("e_long", "おおきい")
+        aid = self.sql("SELECT id FROM attempts")[0][0]
+        self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", aid)
+        data = {"round_id": "p", "stage": 0,
+                "units": [{"unit": "u_meshiagaru", "kind": "phrase", "gist": "店員敬語：お召し上がり＝吃",
+                           "from_encounter": "お召し上がり"}],
+                "items": [{"key": "p1", "unit": "u_meshiagaru", "task": "choice", "prompt": "P?",
+                           "choices": ["吃", "買"], "answers": ["吃"], "probe": "店内"}]}
+        f = Path(self.tmp.name) / "p.json"
+        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.jl("import", f)
+        self.assertEqual(self.sql("SELECT unit FROM encounters")[0][0], "u_meshiagaru")
+        self.assertIn("probe: 店内", self.jl("present", "p1").stdout)
+        bad = dict(data, units=[dict(data["units"][0], unit="u_x", from_encounter="不存在")],
+                   items=[dict(data["items"][0], key="p2", unit="u_x")])
+        f.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+        self.assertNotEqual(self.jl("import", f, ok=False).returncode, 0)
+
+    def test_park_and_unpark(self):
+        for k in ("a_free", "b_free", "c_choice", "d_free", "k_kana", "c_cloze"):
+            self.jl("retire", k, "--reason", "t")
+        self.jl("item", "park", "e_long", "--reason", "too_hard")
+        self.assertIn("NO_ITEMS", self.jl("next").stdout)
+        self.assertEqual(self.sql("SELECT reason FROM v_parked")[0][0], "too_hard")
+        self.assertNotEqual(self.jl("item", "park", "a_free", "--reason", "x", ok=False).returncode, 0)
+        self.jl("item", "unpark", "e_long")
+        self.assertIn("item: e_long", self.jl("next").stdout)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM item_edits WHERE field='retired'")[0][0], 2)
+
+
+def datetime_ts(s):
+    from datetime import datetime
+    return datetime.fromisoformat(s).timestamp()
 
 
 class TestConfusion(Base):

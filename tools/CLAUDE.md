@@ -9,8 +9,9 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `resume [--hook] [--source startup\|resume\|clear\|compact]` | 顯示階段、checkpoint、到期、弱點、混淆、題庫缺口。由 SessionStart hook 自動執行；compact／resume 沿用同一 session，其餘開新 session |
 | `next [-n N] [--new-round]` | 出下一題並建立 `presentation`（到期且最易忘者優先，進行中混淆優先；否則新題；自動交錯類型與題型）。輸出不含答案。本輪達 `round_max` 題回 `ROUND_LIMIT`；手動 checkpoint 後回 `ROUND_CLOSED`，使用者明確說繼續才加 `--new-round` |
 | `present <item_key>` | 指定某題出題（重考用） |
-| `answer <presentation> "<原文>" [--confidence ..] [--basis ..] [--outcome ..] [--tags t1,t2] [--pick "<選項>"] [--note ".."]` | 判分並寫入。能確定時直接寫入；`NEEDS_JUDGMENT` 時不寫入，判斷後加 `--outcome`（答錯加 `--tags`）再執行一次。同一 presentation 只能作答一次 |
-| `report [--attempt id] [--confidence ..] [--basis ..] [--note ..] [--phase after_feedback\|with_answer]` | 補記使用者自述（預設最後一筆、after_feedback）；另存一列，排程依最新自述重算 |
+| `answer <presentation> "<原文>" [--confidence ..] [--basis ..] [--miss slip\|probe\|unreadable] [--outcome ..] [--tags t1,t2] [--pick "<選項>"] [--note ".."]` | 判分並寫入。能確定時直接寫入；`NEEDS_JUDGMENT` 時不寫入，判斷後加 `--outcome`（答錯加 `--tags`）再執行一次。同一 presentation 只能作答一次 |
+| `report [--attempt id] [--confidence ..] [--basis ..] [--miss ..] [--note ..] [--phase after_feedback\|with_answer]` | 補記使用者自述（預設最後一筆、after_feedback）；另存一列，排程依最新自述重算 |
+| `seen add --term "<詞>" --kind word\|grammar\|expression --attempt <id> [--where prompt\|choice] [--reading ..] [--zh ..] [--unit ..]` | 記錄**題目中看到但不認識**的元素（答不出考點本身不記）；同 term 再加會累計 |
 
 ## 查詢
 | 指令 | 用途 |
@@ -21,6 +22,7 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `variants` | 需要新情境變體的 unit（`v_variants_needed`）與缺題的 skill（`v_skill_gaps`），給 generator 用 |
 | `unit show <unit>` | 單一 unit 的狀態、排程、統計、各題進度 |
 | `confusion list [--status ..] [--kind ..] [--unit ..] [--untaught]` | 查詢混淆 |
+| `seen list [--open]` | 題目中遇到的未知元素（open＝尚未升格成 unit） |
 
 ## 維護
 | 指令 | 用途 |
@@ -31,6 +33,8 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `unit set <unit> [--gist ..] [--label ..] [--add-skill ..]` | 修改 unit 重點或宣告 skill |
 | `item edit <key> [--add-answer ..] [--remove-answer ..] [--explain ..] [--zh ..] [--reading ..] [--prompt ..]` | 修題，舊值存入 `item_edits` |
 | `retire <key> --reason ".."` | 停用題目（不再出題，紀錄保留） |
+| `item park <key> --reason ".."` / `item unpark <key>` | 暫停／恢復出題（例如整題看不懂），與永久 retire 區分；暫停中的題目見 `v_parked` |
+| `seen link <id\|term> <unit>` | 把未知元素連到 unit（匯入時也可用 units 段的 `from_encounter`） |
 | `stage [n]` | 查看／設定階段（新題只從 stage <= n 抽） |
 | `rebuild` | 由 attempts＋自述重算全部 `unit_state`、`unit_stats` |
 | `confusion add/taught/merge` | 見 `../rules/quiz-protocol.md` 與 `../data/CLAUDE.md` |
@@ -47,13 +51,16 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
    "answers": ["で"],
    "jp": "日文", "reading": "假名", "zh": "中文意思",
    "scenario": "情境標籤", "why_natural": "為何這是真實會出現的（審題用）",
-   "explain": "答錯時的差異點提示（一到兩行）", "stage": 1}
+   "explain": "答錯時的差異點提示（一到兩行）", "stage": 1,
+   "probe": "（選填）刻意放入的未知元素，每題最多一個"}
  ]}
 ```
 - `units` 段可省略；省略時題目要填 `kind`（kana|word|phrase|grammar|other），第一次出現的 unit 自動建立。`gist` ≤ 80 字。
 - `task` 必須是 `task_types` 裡的題型（`jl.py schema` 查）；unit 的 skill 由其題目的題型自動加入，也可在 `units` 段預先宣告。
 - `choices` 有值＝選擇式作答；選項可寫成 `{"text", "unit"}` 標出誘答項對應的 unit（選到時記錄並提示混淆候選）。選擇式的 `answers` 必須在 `choices` 內。
 - 產出題的 `answers` 只列核心寫法；`reading` 也會被當作可接受寫法（讀音題與產出題）。其餘變體由主對話判斷。
+- `probe`：刻意放入、使用者可能不認識的元素（見 `../rules/content-policy.md`「探索未知元素」）；`next` 會顯示 `probe:` 行，只供主對話參考。
+- `units` 段可加 `"from_encounter": "<term>"`：這個 unit 是由題目中遇到的未知元素升格而來，匯入時自動連結。
 - 判分只依 `answers`／`reading`；信心與依據由使用者自述決定（見 `../rules/quiz-protocol.md`）。
 
 ## 時間模擬（僅驗證用）

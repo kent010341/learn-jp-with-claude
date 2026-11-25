@@ -4,8 +4,8 @@
 用法：python tools/jl.py <command> [...]；`python tools/jl.py schema` 看資料表、view 與列舉值。
 環境變數：JL_NOW=<epoch 或 ISO 時間> 模擬時間（驗證用）；JL_DB=<路徑>、JL_SEED=<目錄> 指定資料庫與種子目錄（驗證用）。
 
-資料模型（schema v5）：
-- 原始時序表（append-only）：presentations、attempts、attempt_reports、attempt_tags、item_edits、checkpoints。
+資料模型（schema v6）：
+- 原始時序表（append-only）：rounds、presentations、attempts、attempt_reports、attempt_tags、item_edits、checkpoints。
 - 衍生 aggregate（可由 rebuild 重算）：unit_state（unit×skill 排程）、unit_stats（unit×skill 計數）。
 - 具名 view：v_* 與 confusion_status，供 `jl.py sql` 查詢。
 """
@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("JL_DB") or ROOT / "data" / "learning.db")
 SEED_DIR = Path(os.environ.get("JL_SEED") or ROOT / "curriculum" / "seed")
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DEFAULT_META = {
     "stage": "0",
@@ -37,8 +37,8 @@ DEFAULT_META = {
     "cons_min_stability": "60",    # 鞏固：穩定度需 >= 此天數
     "learn_step_min": "10",        # 答錯後最快幾分鐘再出現
     "day_start_hour": "4",         # 學習日的日界（此時刻前算前一天：中間要經過睡眠才算隔天）
-    "round_max": "20",             # 一輪最多作答題數：達到後 next 不再出題，須 checkpoint 並停下
-    "round_closed": "0",           # 手動 checkpoint 會關閉本輪；使用者明確說繼續後才以 next --new-round 開新一輪
+    "round_max": "20",             # 一輪題數上限（round start 一次排好整輪）
+    "new_item_ratio": "0.35",      # 題庫有未作答過的題時，每輪至少這個比例是新題
 }
 
 # 排程模型常數：FSRS 風格的簡化版，初始值未經個人資料擬合
@@ -46,6 +46,7 @@ _FACTOR = 19 / 81
 _DECAY = -0.5
 _S0 = {0: 0.3, 1: 0.5, 2: 0.8, 3: 1.5, 4: 3.0, 5: 5.0}
 QUALITY_PASS = 3
+MAX_PRODUCE_ANSWERS = 5           # 產出題只放參考答案，可接受範圍寫在 judge
 
 # 列舉值（同時寫進 SQL CHECK，`jl.py schema` 會列出）
 OUTCOMES = ("correct", "incorrect", "skipped")
@@ -57,7 +58,8 @@ GRADE_RESULTS = ("exact", "tolerant", "mismatch", "judged", "unknown")
 SKILLS = ("comprehend", "produce")
 GRADINGS = ("auto", "auto_then_judge", "judge")
 UNIT_KINDS = ("kana", "word", "phrase", "grammar", "other")
-PHASES = ("with_answer", "after_feedback")
+PHASES = ("with_answer", "after_feedback", "correction")   # correction＝改判或撤回
+NONE = "none"                                   # 自述欄位寫 none＝撤回先前的值
 # 答錯原因（使用者自述）：slip 粗心/漏看；probe 卡在題目裡的未知元素；unreadable 整題看不懂
 MISSES = ("slip", "probe", "unreadable")
 LIGHT_MISSES = ("slip", "probe")            # 輕度失誤：有量到一部分
@@ -141,7 +143,8 @@ CREATE TABLE IF NOT EXISTS items(
   stage INTEGER NOT NULL DEFAULT 0,
   source TEXT,
   retired TEXT,                -- NULL＝使用中；否則為停用原因（parked: 開頭＝暫停，可 unpark）
-  probe TEXT                   -- 刻意放入題目的未知元素（每題最多一個）
+  probe TEXT,                  -- 刻意放入題目的未知元素（每題最多一個）
+  judge TEXT                   -- 判分準則：考點、什麼算對、可接受的考點外差異（AI 依此判斷）
 );
 CREATE INDEX IF NOT EXISTS idx_items_unit ON items(unit);
 CREATE INDEX IF NOT EXISTS idx_items_task ON items(task);
@@ -151,14 +154,23 @@ CREATE TABLE IF NOT EXISTS item_edits(
   field TEXT NOT NULL, old TEXT, new TEXT
 );
 CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, started_ts REAL, ended_ts REAL);
+CREATE TABLE IF NOT EXISTS rounds(            -- 一輪＝round start 一次排好的題目；手動 checkpoint 關閉
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER REFERENCES sessions(id),
+  started_ts REAL NOT NULL, closed_ts REAL,
+  planned INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS presentations(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL REFERENCES items(id),
   ts REAL NOT NULL,
   session_id INTEGER REFERENCES sessions(id),
-  shown_choices TEXT           -- 實際顯示順序（JSON list）
+  shown_choices TEXT,          -- 實際顯示順序（JSON list）
+  round_id INTEGER REFERENCES rounds(id),
+  seq INTEGER                  -- 在該輪的順序（1 起）
 );
 CREATE INDEX IF NOT EXISTS idx_presentations_item ON presentations(item_id, ts);
+CREATE INDEX IF NOT EXISTS idx_presentations_round ON presentations(round_id, seq);
 CREATE TABLE IF NOT EXISTS attempts(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   item_id INTEGER NOT NULL REFERENCES items(id),
@@ -181,15 +193,16 @@ CREATE INDEX IF NOT EXISTS idx_attempts_day ON attempts(learn_day);
 CREATE INDEX IF NOT EXISTS idx_attempts_session ON attempts(session_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_outcome ON attempts(outcome);
 CREATE INDEX IF NOT EXISTS idx_attempts_picked ON attempts(picked_unit);
-CREATE TABLE IF NOT EXISTS attempt_reports(   -- 使用者自述（append-only；最新的非空值有效）
+CREATE TABLE IF NOT EXISTS attempt_reports(   -- 自述與改判（append-only；各欄最新的非空值有效，none＝撤回）
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   attempt_id INTEGER NOT NULL REFERENCES attempts(id),
   ts REAL NOT NULL,
   phase TEXT NOT NULL CHECK(phase IN {_in(PHASES)}),
-  confidence TEXT CHECK(confidence IS NULL OR confidence IN {_in(CONFIDENCES)}),
-  basis TEXT CHECK(basis IS NULL OR basis IN {_in(BASES)}),
+  confidence TEXT CHECK(confidence IS NULL OR confidence IN {_in(CONFIDENCES + (NONE,))}),
+  basis TEXT CHECK(basis IS NULL OR basis IN {_in(BASES + (NONE,))}),
   note TEXT,
-  miss TEXT CHECK(miss IS NULL OR miss IN {_in(MISSES)})
+  miss TEXT CHECK(miss IS NULL OR miss IN {_in(MISSES + (NONE,))}),
+  outcome TEXT CHECK(outcome IS NULL OR outcome IN {_in(OUTCOMES)})   -- 改判（phase=correction）
 );
 CREATE INDEX IF NOT EXISTS idx_reports_attempt ON attempt_reports(attempt_id);
 CREATE TABLE IF NOT EXISTS encounters(    -- 在題目（題幹/選項）中看到但不認識的元素；答不出考點不記這裡
@@ -223,6 +236,7 @@ CREATE TABLE IF NOT EXISTS unit_state(
   reps_success INTEGER, lapses INTEGER,
   distinct_success_days INTEGER, max_successful_gap_days INTEGER,
   success_days TEXT, last_ts REAL,
+  last_fail_day INTEGER,       -- 最近一次答錯/跳過的學習日（同日之後的答對不算成功日）
   PRIMARY KEY(unit, skill)
 );
 CREATE INDEX IF NOT EXISTS idx_unit_state_due ON unit_state(due_ts);
@@ -270,14 +284,19 @@ CREATE INDEX IF NOT EXISTS idx_confusions_last_seen ON confusions(last_seen);
 # view 每次連線時重建（與程式同步）
 VIEWS = {
     "v_attempt_effective": """
-SELECT a.*, i.key AS item_key, i.task AS task, t.skill AS skill,
-  (SELECT r.confidence FROM attempt_reports r WHERE r.attempt_id=a.id AND r.confidence IS NOT NULL
-     ORDER BY r.id DESC LIMIT 1) AS confidence,
-  (SELECT r.basis FROM attempt_reports r WHERE r.attempt_id=a.id AND r.basis IS NOT NULL
-     ORDER BY r.id DESC LIMIT 1) AS basis,
-  (SELECT r.miss FROM attempt_reports r WHERE r.attempt_id=a.id AND r.miss IS NOT NULL
-     ORDER BY r.id DESC LIMIT 1) AS miss,
+SELECT a.id, a.item_id, a.unit, a.presentation_id, a.ts, a.learn_day, a.session_id,
+  COALESCE((SELECT r.outcome FROM attempt_reports r WHERE r.attempt_id=a.id AND r.outcome IS NOT NULL
+     ORDER BY r.id DESC LIMIT 1), a.outcome) AS outcome,
+  a.outcome AS recorded_outcome, a.answer_mode, a.user_answer, a.picked_text, a.picked_unit, a.grade_result, a.note,
+  i.key AS item_key, i.task AS task, t.skill AS skill,
+  NULLIF((SELECT r.confidence FROM attempt_reports r WHERE r.attempt_id=a.id AND r.confidence IS NOT NULL
+     ORDER BY r.id DESC LIMIT 1), 'none') AS confidence,
+  NULLIF((SELECT r.basis FROM attempt_reports r WHERE r.attempt_id=a.id AND r.basis IS NOT NULL
+     ORDER BY r.id DESC LIMIT 1), 'none') AS basis,
+  NULLIF((SELECT r.miss FROM attempt_reports r WHERE r.attempt_id=a.id AND r.miss IS NOT NULL
+     ORDER BY r.id DESC LIMIT 1), 'none') AS miss,
   EXISTS(SELECT 1 FROM attempt_reports r WHERE r.attempt_id=a.id AND r.phase='after_feedback') AS has_after_feedback,
+  EXISTS(SELECT 1 FROM attempt_reports r WHERE r.attempt_id=a.id AND r.outcome IS NOT NULL) AS regraded,
   (SELECT group_concat(g.tag, ',') FROM attempt_tags g WHERE g.attempt_id=a.id) AS tags,
   i.probe AS probe
 FROM attempts a JOIN items i ON i.id=a.item_id JOIN task_types t ON t.task=i.task""",
@@ -313,13 +332,23 @@ FROM v_attempt_effective e JOIN items i ON i.id=e.item_id WHERE e.outcome!='corr
     "v_distractor_picks": """
 SELECT unit, picked_unit, COUNT(*) AS n, MAX(ts) AS last_ts
 FROM attempts WHERE picked_unit IS NOT NULL AND picked_unit!=unit GROUP BY unit, picked_unit""",
+    "v_unseen_items": """
+SELECT i.id AS item_id, i.key, i.unit, i.task, t.skill, i.source, i.stage
+FROM items i JOIN task_types t ON t.task=i.task
+WHERE i.retired IS NULL AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.item_id=i.id)""",
+    "v_rounds": """
+SELECT r.id, r.session_id, r.started_ts, r.closed_ts, r.planned,
+  (SELECT COUNT(*) FROM presentations p JOIN attempts a ON a.presentation_id=p.id WHERE p.round_id=r.id) AS recorded,
+  (SELECT MIN(p.seq) FROM presentations p WHERE p.round_id=r.id
+     AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.presentation_id=p.id)) AS next_seq
+FROM rounds r""",
     "v_basis_accuracy": """
 SELECT task, skill, COALESCE(confidence,'unreported') AS confidence, COALESCE(basis,'unreported') AS basis,
   COUNT(*) AS n, SUM(outcome='correct') AS n_correct
 FROM v_attempt_effective GROUP BY 1,2,3,4""",
     "v_tag_counts": """
-SELECT g.tag, a.unit, COUNT(*) AS n, MAX(a.ts) AS last_ts
-FROM attempt_tags g JOIN attempts a ON a.id=g.attempt_id GROUP BY g.tag, a.unit""",
+SELECT g.tag, e.unit, e.outcome, COUNT(*) AS n, MAX(e.ts) AS last_ts
+FROM attempt_tags g JOIN v_attempt_effective e ON e.id=g.attempt_id GROUP BY g.tag, e.unit, e.outcome""",
     "v_comprehend_vs_produce": """
 SELECT u.unit, c.tier AS comp_tier, c.stability_days AS comp_S, p.tier AS prod_tier, p.stability_days AS prod_S,
   sc.n AS comp_n, sc.n_correct AS comp_ok, sp.n AS prod_n, sp.n_correct AS prod_ok
@@ -373,14 +402,16 @@ FROM confusions c""",
 }
 
 VIEW_DOCS = {
-    "v_attempt_effective": "attempts＋題型/skill＋最新自述(confidence/basis)＋tags",
+    "v_attempt_effective": "attempts＋題型/skill＋最新自述(confidence/basis/miss，none＝撤回)＋改判後的 outcome＋tags",
     "v_unit_status": "每個 unit 的狀態 new/learning/review/consolidated（全部 skill 都鞏固才算）",
     "v_schedule": "unit×skill 排程（due_at、穩定度、lapses）",
     "v_item_progress": "每題被出幾次、答幾次、答對幾次",
     "v_recent_errors": "所有答錯/跳過（含選到的誘答項、tags、自述）",
     "v_distractor_picks": "誘答項被選次數（題目 unit → 被選的 unit）",
     "v_basis_accuracy": "依題型/信心/依據分組的答對數",
-    "v_tag_counts": "錯誤 tag × unit 次數",
+    "v_tag_counts": "tag × unit × outcome 次數（outcome=correct 的 tag＝考點以外的錯）",
+    "v_unseen_items": "還沒作答過的有效題（判斷要不要出新題）",
+    "v_rounds": "每輪：排了幾題、已記錄幾題、下一個未記錄的 seq",
     "v_comprehend_vs_produce": "同時有理解與產出的 unit：兩邊的狀態與答對數（找會認不會說）",
     "v_variants_needed": "該 skill 的每題都已在 2 個以上學習日答對、但未鞏固 → 需要新情境變體（避免只記住那一題）",
     "v_skill_gaps": "宣告了 skill 卻沒有該 skill 的有效題",
@@ -415,18 +446,21 @@ def _create(con):
     con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
 
 
+DERIVED_TABLES = ("unit_state", "unit_stats")   # 遷移時不搬，遷移後 rebuild 重算
+
+
 def connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     migrated = None
     if DB_PATH.exists():
         v = _peek_version(DB_PATH)
         if v is not None and v < SCHEMA_VERSION:
-            if v not in (3, 4):
-                raise SystemExit(f"[migrate] 只支援從 schema v3/v4 遷移（目前 v{v}）")
+            if v < 5:
+                raise SystemExit(f"[migrate] 只支援從 schema v5 起遷移（目前 v{v}）；更舊的備份請用舊版 jl.py 先升到 v5")
             bak = DB_PATH.with_name(f"{DB_PATH.stem}.v{v}.bak.db")
             if not bak.exists():
                 shutil.copy2(DB_PATH, bak)
-            (migrate_v3 if v == 3 else migrate_v4)(DB_PATH)
+            migrate_copy(DB_PATH, v)
             migrated = (v, bak.name)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
@@ -441,113 +475,42 @@ def connect():
     return con
 
 
-def migrate_v4(path):
-    """v4 → v5：只加欄位（items.probe、attempt_reports.miss）；unit_stats 是衍生表，直接重建；新表由 SCHEMA 建立。"""
-    con = sqlite3.connect(path)
-    try:
-        for name in VIEWS:
-            con.execute(f"DROP VIEW IF EXISTS {name}")
-        cols = {r[1] for r in con.execute("PRAGMA table_info(items)")}
-        if "probe" not in cols:
-            con.execute("ALTER TABLE items ADD COLUMN probe TEXT")
-        cols = {r[1] for r in con.execute("PRAGMA table_info(attempt_reports)")}
-        if "miss" not in cols:
-            con.execute(f"ALTER TABLE attempt_reports ADD COLUMN miss TEXT CHECK(miss IS NULL OR miss IN {_in(MISSES)})")
-        con.execute("DROP TABLE IF EXISTS unit_stats")
-        con.commit()
-    finally:
-        con.close()
-
-
-def _legacy_task(it):
-    if it["qtype"] == "choice":
-        return "choice"
-    if it["format"] == "produce":
-        return "translate" if re.search(r"日文怎麼|怎麼(說|講|回)", it["prompt"]) else "respond"
-    answers = json.loads(it["answers"])
-    return "meaning" if any(is_chinese_answer(a) for a in answers) else "reading"
-
-
-def _seed_why_natural():
-    out = {}
-    if SEED_DIR.is_dir():
-        for p in SEED_DIR.glob("*.json"):
-            for it in json.loads(p.read_text(encoding="utf-8")).get("items", []):
-                if it.get("why_natural"):
-                    out[it["key"]] = it["why_natural"]
-    return out
-
-
-def migrate_v3(path):
-    """v3 → v4：讀出舊資料，寫進新檔案後替換（原檔已備份）。"""
-    old = sqlite3.connect(path)
-    old.row_factory = sqlite3.Row
-
-    def rows(q):
-        return [dict(r) for r in old.execute(q)]
-
-    items = rows("SELECT * FROM items ORDER BY id")
-    attempts = rows("SELECT * FROM attempts ORDER BY id")
-    sessions = rows("SELECT * FROM sessions ORDER BY id")
-    checkpoints = rows("SELECT * FROM checkpoints ORDER BY id")
-    confs = rows("SELECT * FROM confusions ORDER BY id")
-    members = rows("SELECT * FROM confusion_members")
-    clinks = rows("SELECT * FROM confusion_attempts")
-    metas = rows("SELECT * FROM meta WHERE key NOT LIKE 'shown:%' AND key!='schema_version'")
-    old.close()
-
-    tmp = path.with_name(path.name + ".v4tmp")
+def migrate_copy(path, old_version):
+    """通用遷移：以目前的 SCHEMA 建新檔，逐表搬移兩邊都有的欄位，再替換原檔（原檔已備份）。
+    開發期允許破壞性改寫（見 docs/development.md）：新欄位取預設值，衍生表不搬、之後 rebuild。"""
+    tmp = path.with_name(path.name + ".migrating")
     if tmp.exists():
         tmp.unlink()
     new = sqlite3.connect(tmp)
-    new.row_factory = sqlite3.Row
-    new.execute("PRAGMA foreign_keys=ON")
-    _create(new)
-    for m in metas:
-        new.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (m["key"], m["value"]))
-    why = _seed_why_natural()
-    seen_units = {}
-    for it in items:
-        u = it["unit"]
-        if u not in seen_units:
-            seen_units[u] = it
-            new.execute("INSERT INTO units(unit,kind,label,jp,zh,stage) VALUES(?,?,?,?,?,?)",
-                        (u, it["kind"] if it["kind"] in UNIT_KINDS else "other", it["jp"], it["jp"], it["zh"], it["stage"]))
-        else:
-            new.execute("UPDATE units SET stage=MIN(stage,?) WHERE unit=?", (it["stage"], u))
-        task = _legacy_task(it)
-        new.execute("""INSERT INTO items(id,key,unit,task,prompt,choices,answers,jp,reading,zh,scenario,why_natural,
-                       explain,stage,source,retired) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (it["id"], it["key"], u, task, it["prompt"], it["choices"], it["answers"], it["jp"], it["reading"],
-                     it["zh"], it["scenario"], why.get(it["key"]), it["explain"], it["stage"], it["source"], it["retired"]))
-        new.execute("INSERT OR IGNORE INTO unit_skills(unit,skill) SELECT ?, skill FROM task_types WHERE task=?", (u, task))
-    for s in sessions:
-        new.execute("INSERT INTO sessions(id,started_ts,ended_ts) VALUES(?,?,?)", (s["id"], s["started_ts"], s["ended_ts"]))
-    hour = int(dict((m["key"], m["value"]) for m in metas).get("day_start_hour", DEFAULT_META["day_start_hour"]))
-    for a in attempts:
-        mode = a["answer_mode"] if a["answer_mode"] in MODES else "unknown"
-        new.execute("""INSERT INTO attempts(id,item_id,unit,ts,learn_day,session_id,outcome,answer_mode,user_answer,note)
-                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (a["id"], a["item_id"], a["unit"], a["ts"], learn_day(a["ts"], hour), a["session_id"], a["outcome"],
-                     mode, a["user_answer"], a["note"]))
-        if a["confidence"] or a["basis"]:
-            new.execute("""INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis) VALUES(?,?,?,?,?)""",
-                        (a["id"], a["ts"], "with_answer", a["confidence"], a["basis"]))
-    for c in checkpoints:
-        new.execute("INSERT INTO checkpoints(id,session_id,ts,kind,summary,next_focus) VALUES(?,?,?,?,?,?)",
-                    (c["id"], c["session_id"], c["ts"], "manual", c["summary"], c["next_focus"]))
-    for c in confs:
-        new.execute("""INSERT INTO confusions(id,label,kind,cause,axis,gist,pair_key,miss_count,first_seen,last_seen,
-                       taught_at,taught_session,merged_into) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    tuple(c[k] for k in ("id", "label", "kind", "cause", "axis", "gist", "pair_key", "miss_count",
-                                         "first_seen", "last_seen", "taught_at", "taught_session", "merged_into")))
-    new.executemany("INSERT INTO confusion_members(confusion_id,unit) VALUES(?,?)",
-                    [(m["confusion_id"], m["unit"]) for m in members])
-    new.executemany("INSERT INTO confusion_attempts(confusion_id,attempt_id) VALUES(?,?)",
-                    [(m["confusion_id"], m["attempt_id"]) for m in clinks])
-    new.commit()
-    new.close()
+    new.execute(f"ATTACH DATABASE ? AS old", (str(path),))
+    try:
+        new.executescript(SCHEMA)
+        tables = [r[0] for r in new.execute("SELECT name FROM main.sqlite_master WHERE type='table' "
+                                            "AND name NOT LIKE 'sqlite_%'")]
+        old_tables = {r[0] for r in new.execute("SELECT name FROM old.sqlite_master WHERE type='table'")}
+        for t in tables:
+            if t in DERIVED_TABLES or t not in old_tables:
+                continue
+            new_cols = [r[1] for r in new.execute(f"PRAGMA main.table_info({t})")]
+            old_cols = {r[1] for r in new.execute(f"PRAGMA old.table_info({t})")}
+            cols = ",".join(c for c in new_cols if c in old_cols)
+            q = f"INSERT INTO main.{t}({cols}) SELECT {cols} FROM old.{t}"
+            if t == "meta":
+                q += " WHERE key NOT IN ('schema_version','round_closed')"
+            new.execute(q)
+        _post_migrate(new, old_version)
+        new.commit()
+        new.execute("DETACH DATABASE old")
+    finally:
+        new.close()
     os.replace(tmp, path)
+
+
+def _post_migrate(con, old_version):
+    """各版遷移後的值調整（AI 決定，只要下一輪測驗仍有意義）。"""
+    if old_version < 6:
+        # v5 沒有 rounds：舊的出題不屬於任何一輪；舊的 round_closed 旗標改由 rounds 表表示（無進行中的一輪）
+        pass
 
 
 def meta(con, key):
@@ -600,6 +563,10 @@ def import_file(con, path, quiet=False):
     src = data.get("round_id") or Path(path).stem
     stage = int(data.get("stage", 0))
     tasks = task_map(con)
+    new_keys = [it["key"] for it in data["items"]
+                if not con.execute("SELECT 1 FROM items WHERE key=?", (it["key"],)).fetchone()]
+    if new_keys and con.execute("SELECT 1 FROM items WHERE source=?", (src,)).fetchone():
+        raise SystemExit(f"[import] round_id {src!r} 已被先前匯入的題目使用；請改用新的 round_id（建議 {next_round_id(con, src)}）")
     for u in data.get("units", []):
         upsert_unit(con, u, stage)
     added = skipped = 0
@@ -623,21 +590,34 @@ def import_file(con, path, quiet=False):
             raise SystemExit(f"[import] {key}: 選擇式題目的 answers 必須出現在 choices 中")
         if not answers and tasks[task]["grading"] != "judge":
             raise SystemExit(f"[import] {key}: 缺少 answers")
+        if tasks[task]["skill"] == "produce" and len(answers) > MAX_PRODUCE_ANSWERS:
+            raise SystemExit(f"[import] {key}: 產出題的 answers 只放 1–{MAX_PRODUCE_ANSWERS} 個參考答案，"
+                             "可接受的範圍寫在 judge（由 AI 判斷），不要窮舉")
         con.execute(
             """INSERT INTO items(key,unit,task,prompt,choices,choice_units,answers,jp,reading,zh,scenario,why_natural,
-               explain,stage,source,probe) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               explain,stage,source,probe,judge) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (key, unit, task, it["prompt"],
              json.dumps(texts, ensure_ascii=False) if texts else None,
              json.dumps(cunits, ensure_ascii=False) if cunits else None,
              json.dumps(answers, ensure_ascii=False), it.get("jp"), it.get("reading"), it.get("zh"),
              it.get("scenario"), it.get("why_natural"), it.get("explain"), int(it.get("stage", stage)), src,
-             it.get("probe")))
+             it.get("probe"), it.get("judge")))
         con.execute("INSERT OR IGNORE INTO unit_skills(unit,skill) VALUES(?,?)", (unit, tasks[task]["skill"]))
         added += 1
+    if added and not quiet:
+        set_meta(con, "last_import", json.dumps({"source": src, "n": added, "ts": now_ts()}, ensure_ascii=False))
     con.commit()
     if not quiet:
         print(f"imported {src}: +{added}, skipped {skipped}")
     return added
+
+
+def next_round_id(con, src):
+    m = re.match(r"(.*_r)(\d+)$", src)
+    prefix = m.group(1) if m else src + "_r"
+    nums = [int(x[0][len(prefix):]) for x in con.execute("SELECT DISTINCT source FROM items WHERE source LIKE ?",
+                                                         (prefix + "%",)) if x[0][len(prefix):].isdigit()]
+    return f"{prefix}{max(nums, default=0) + 1}"
 
 
 def ensure_seeds(con):
@@ -853,7 +833,7 @@ def clamp(x, lo, hi):
 def empty_state():
     return {"tier": "new", "difficulty": None, "stability_days": None, "due_ts": None,
             "reps_success": 0, "lapses": 0, "distinct_success_days": 0,
-            "max_successful_gap_days": 0, "success_days": [], "last_ts": None}
+            "max_successful_gap_days": 0, "success_days": [], "last_ts": None, "last_fail_day": None}
 
 
 def is_consolidated(st, cfg, elapsed):
@@ -954,10 +934,11 @@ def apply_attempt(st, ev, ts, cfg):
 def save_state(con, unit, skill, st):
     con.execute(
         """INSERT OR REPLACE INTO unit_state(unit,skill,tier,difficulty,stability_days,due_ts,reps_success,lapses,
-           distinct_success_days,max_successful_gap_days,success_days,last_ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+           distinct_success_days,max_successful_gap_days,success_days,last_ts,last_fail_day)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (unit, skill, st["tier"], st["difficulty"], st["stability_days"], st["due_ts"], st["reps_success"],
          st["lapses"], st["distinct_success_days"], st["max_successful_gap_days"], json.dumps(st["success_days"]),
-         st["last_ts"]))
+         st["last_ts"], st["last_fail_day"]))
 
 
 def refresh_unit(con, unit, cfg=None):
@@ -965,11 +946,16 @@ def refresh_unit(con, unit, cfg=None):
     cfg = cfg or cfg_of(con)
     con.execute("DELETE FROM unit_state WHERE unit=?", (unit,))
     states = {}
-    for a in con.execute("""SELECT ts, outcome, confidence, basis, answer_mode, miss, skill FROM v_attempt_effective
-                            WHERE unit=? ORDER BY ts, id""", (unit,)):
+    for a in con.execute("""SELECT ts, learn_day, outcome, confidence, basis, answer_mode, miss, skill
+                            FROM v_attempt_effective WHERE unit=? ORDER BY ts, id""", (unit,)):
         st = states.get(a["skill"]) or empty_state()
         ev = evidence(a["outcome"], a["confidence"], a["basis"], a["answer_mode"], a["miss"])
-        states[a["skill"]] = apply_attempt(st, ev, a["ts"], cfg)
+        if ev in (3, 4) and st["last_fail_day"] == a["learn_day"]:
+            ev = "W"  # 同一學習日已答錯（看過正解）後的答對只是短期記憶：弱證據，不算成功日
+        st = apply_attempt(st, ev, a["ts"], cfg)
+        if a["outcome"] != "correct":
+            st["last_fail_day"] = a["learn_day"]
+        states[a["skill"]] = st
     for skill, st in states.items():
         save_state(con, unit, skill, st)
     con.execute("DELETE FROM unit_stats WHERE unit=?", (unit,))
@@ -1026,16 +1012,19 @@ def active_items(con, unit, skill):
                           WHERE i.unit=? AND t.skill=? AND i.retired IS NULL""", (unit, skill)).fetchall()
 
 
-def pick_item(con, unit, skill, last_task=None):
-    rows = active_items(con, unit, skill)
+def pick_item(con, unit, skill, last_task=None, exclude=()):
+    rows = [r for r in active_items(con, unit, skill) if r["id"] not in exclude]
     if not rows:
         return None
-    ok = {r[0] for r in con.execute("SELECT DISTINCT item_id FROM attempts WHERE unit=? AND outcome='correct'", (unit,))}
-    shown = {r[0]: r[1] for r in con.execute(
-        "SELECT p.item_id, MAX(p.ts) FROM presentations p JOIN items i ON i.id=p.item_id WHERE i.unit=? "
-        "GROUP BY p.item_id", (unit,))}
-    # 優先：該 skill 尚未答對過的題 → 最久沒出的題 → 與上一題不同題型
-    rows = sorted(rows, key=lambda r: (r["id"] in ok, shown.get(r["id"], 0), r["task"] == last_task, r["id"]))
+    ok = {r[0] for r in con.execute(
+        "SELECT DISTINCT item_id FROM v_attempt_effective WHERE unit=? AND outcome='correct'", (unit,))}
+    last = {}
+    for r in con.execute("SELECT item_id, ts, outcome FROM v_attempt_effective WHERE unit=? ORDER BY ts, id", (unit,)):
+        last[r["item_id"]] = (r["ts"], r["outcome"])
+    # 優先：上次不是答錯的題（答錯後換同 unit 的另一題重測）→ 尚未答對過 → 最久沒作答 → 與上一題不同題型
+    rows = sorted(rows, key=lambda r: (last.get(r["id"], (0, None))[1] not in (None, "correct"),
+                                       r["id"] in ok, last.get(r["id"], (0, None))[0],
+                                       r["task"] == last_task, r["id"]))
     return rows[0]
 
 
@@ -1045,211 +1034,323 @@ def active_confusion_units(con):
            WHERE v.status='drilling'""")}
 
 
-def candidate_pairs(con, ts):
-    stage = int(meta(con, "stage"))
+def due_pairs(con, ts):
+    """到期的 unit×skill：進行中混淆的 unit 優先，其次最易忘。"""
     due = con.execute("""SELECT s.unit, s.skill, s.stability_days, s.last_ts FROM unit_state s
                          WHERE s.due_ts<=? AND EXISTS(SELECT 1 FROM items i JOIN task_types t ON t.task=i.task
                            WHERE i.unit=s.unit AND t.skill=s.skill AND i.retired IS NULL)""", (ts,)).fetchall()
     due = sorted(due, key=lambda r: retr((ts - r["last_ts"]) / 86400, r["stability_days"]))
-    act = active_confusion_units(con)  # 進行中混淆的到期單元優先（穩定排序）
+    act = active_confusion_units(con)
     due = sorted(due, key=lambda r: r["unit"] not in act)
-    pairs = [(r["unit"], r["skill"]) for r in due]
+    return [(r["unit"], r["skill"]) for r in due]
+
+
+def unseen_items(con):
+    """還沒作答過、可出題（stage 內）的題，依匯入順序。"""
+    return con.execute("""SELECT i.*, u.kind AS unit_kind, v.skill FROM v_unseen_items v JOIN items i ON i.id=v.item_id
+                          JOIN units u ON u.unit=i.unit WHERE i.stage<=? ORDER BY i.id""",
+                       (int(meta(con, "stage")),)).fetchall()
+
+
+def unseen_summary(con):
+    rows = con.execute("""SELECT source, COUNT(*) n FROM v_unseen_items WHERE stage<=? GROUP BY source
+                          ORDER BY MIN(item_id)""", (int(meta(con, "stage")),)).fetchall()
+    total = sum(r["n"] for r in rows)
+    return total, "、".join(f"{r['source']}×{r['n']}" for r in rows)
+
+
+def plan_round(con, n, ts):
+    """排一整輪：到期的 unit 與未作答過的新題各佔名額；同一輪每個 unit 只出一題，最後交錯類型與題型。"""
+    kinds = {r["unit"]: r["kind"] for r in con.execute("SELECT unit, kind FROM units")}
     started = {(r["unit"], r["skill"]) for r in con.execute("SELECT unit, skill FROM unit_state")}
-    comp_items = {r[0] for r in con.execute(
+    comp_units = {r[0] for r in con.execute(
         "SELECT DISTINCT i.unit FROM items i JOIN task_types t ON t.task=i.task "
         "WHERE t.skill='comprehend' AND i.retired IS NULL")}
-    for r in con.execute("""SELECT i.unit, t.skill, MIN(i.id) first_id FROM items i JOIN task_types t ON t.task=i.task
-                            WHERE i.retired IS NULL AND i.stage<=? GROUP BY i.unit, t.skill ORDER BY first_id""",
-                         (stage,)):
-        key = (r["unit"], r["skill"])
-        if key in started:
+    fresh = unseen_items(con)
+    fresh_ids = {r["id"] for r in fresh}
+    reserve = min(math.ceil(n * float(meta(con, "new_item_ratio"))), len({r["unit"] for r in fresh}))
+    plan, taken = [], set()
+
+    def n_new():
+        return sum(1 for it in plan if it["id"] in fresh_ids)
+
+    def take_due(limit_fn):
+        for u, sk in due:
+            if len(plan) >= limit_fn():
+                break
+            if u in taken:
+                continue
+            it = pick_item(con, u, sk)
+            if it:
+                plan.append(it)
+                taken.add(u)
+
+    due = due_pairs(con, ts)
+    take_due(lambda: n - max(reserve - n_new(), 0))      # 1. 到期的，保留新題名額
+    for it in fresh:                                       # 2. 新題（產出排在理解之後）
+        if len(plan) >= n:
+            break
+        if it["unit"] in taken:
             continue
-        # 產出排在理解之後：該 unit 有理解題但還沒開始理解，就先不出產出
-        if r["skill"] == "produce" and r["unit"] in comp_items and (r["unit"], "comprehend") not in started:
+        if it["skill"] == "produce" and it["unit"] in comp_units and (it["unit"], "comprehend") not in started:
             continue
-        pairs.append(key)
-    return pairs
+        plan.append(it)
+        taken.add(it["unit"])
+    take_due(lambda: n)                                    # 3. 名額還有剩就補到期的
+    today = learn_day(ts, meta(con, "day_start_hour"))
+    early = con.execute("""SELECT unit, skill, stability_days, last_ts FROM unit_state
+                           WHERE due_ts>? AND last_ts IS NOT NULL""", (ts,)).fetchall()
+    early = [r for r in early if learn_day(r["last_ts"], meta(con, "day_start_hour")) != today]
+    due = [(r["unit"], r["skill"]) for r in sorted(early, key=lambda r: retr((ts - r["last_ts"]) / 86400,
+                                                                             r["stability_days"]))]
+    take_due(lambda: n)                                    # 4. 還有剩：提早複習最易忘的（今天已作答過的不出）
+    ordered, last_kind, last_task = [], None, None
+    pool = plan[:]
+    while pool:  # 交錯：盡量與上一題不同類型、不同題型
+        it = (next((x for x in pool if kinds[x["unit"]] != last_kind and x["task"] != last_task), None)
+              or next((x for x in pool if kinds[x["unit"]] != last_kind), None)
+              or next((x for x in pool if x["task"] != last_task), None) or pool[0])
+        pool.remove(it)
+        ordered.append(it)
+        last_kind, last_task = kinds[it["unit"]], it["task"]
+    return ordered, fresh_ids
 
 
-def present(con, item, sid):
+def open_round(con):
+    return con.execute("SELECT * FROM v_rounds WHERE closed_ts IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+
+
+def _present(con, item, sid, rid, seq, ts):
     shown = None
     if item["choices"]:
         shown = json.loads(item["choices"])
         random.shuffle(shown)
-    cur = con.execute("INSERT INTO presentations(item_id,ts,session_id,shown_choices) VALUES(?,?,?,?)",
-                      (item["id"], now_ts(), sid, json.dumps(shown, ensure_ascii=False) if shown else None))
-    u = con.execute("SELECT kind FROM units WHERE unit=?", (item["unit"],)).fetchone()
-    skill = con.execute("SELECT skill FROM task_types WHERE task=?", (item["task"],)).fetchone()["skill"]
-    st = con.execute("SELECT tier FROM unit_state WHERE unit=? AND skill=?", (item["unit"], skill)).fetchone()
-    print(f"--- presentation: {cur.lastrowid}")
-    print(f"item: {item['key']}  unit: {item['unit']}  kind: {u['kind']}  task: {item['task']}({skill})"
-          f"  scenario: {item['scenario']}")
-    print(f"prompt: {item['prompt']}")
-    for i, c in enumerate(shown or []):
-        print(f"  {chr(65 + i)}. {c}")
-    print(f"state: {st['tier'] if st else 'new'}")
-    if item["probe"]:
-        print(f"probe: {item['probe']}（刻意放入的未知元素；僅供主對話參考，不要向使用者提示）")
-    return cur.lastrowid
+    con.execute("INSERT INTO presentations(item_id,ts,session_id,shown_choices,round_id,seq) VALUES(?,?,?,?,?,?)",
+                (item["id"], ts, sid, json.dumps(shown, ensure_ascii=False) if shown else None, rid, seq))
 
 
-def last_shown(con):
-    r = con.execute("""SELECT i.task, u.kind FROM presentations p JOIN items i ON i.id=p.item_id
-                       JOIN units u ON u.unit=i.unit ORDER BY p.id DESC LIMIT 1""").fetchone()
-    return (r["kind"], r["task"]) if r else (None, None)
+def print_cards(con, rid, pending_only=True):
+    q = """SELECT p.seq, p.shown_choices, i.*, u.kind AS unit_kind, u.gist, t.skill, s.tier,
+             NOT EXISTS(SELECT 1 FROM attempts x WHERE x.item_id=i.id AND x.presentation_id!=p.id) AS is_new
+           FROM presentations p JOIN items i ON i.id=p.item_id JOIN units u ON u.unit=i.unit
+           JOIN task_types t ON t.task=i.task LEFT JOIN unit_state s ON s.unit=i.unit AND s.skill=t.skill
+           WHERE p.round_id=?""" + (" AND NOT EXISTS(SELECT 1 FROM attempts a WHERE a.presentation_id=p.id)"
+                                    if pending_only else "") + " ORDER BY p.seq"
+    for r in con.execute(q, (rid,)):
+        print(f"[{r['seq']}] {r['key']}  unit={r['unit']}({r['unit_kind']})  task={r['task']}({r['skill']})  "
+              f"state={r['tier'] or 'new'}" + ("  新題" if r["is_new"] else ""))
+        print(f"  題幹: {r['prompt']}")
+        answers = json.loads(r["answers"])
+        if r["shown_choices"]:
+            shown = json.loads(r["shown_choices"])
+            print("  選項: " + "  ".join(f"{chr(65 + i)}. {c}" for i, c in enumerate(shown)))
+            print("  正解: " + " / ".join(f"{chr(65 + shown.index(a))}. {a}" for a in answers if a in shown))
+        elif answers:
+            print(f"  {'參考答案' if r['skill'] == 'produce' else '答案'}: {' / '.join(answers)}")
+        if r["judge"]:
+            print(f"  判分: {r['judge']}")
+        print(f"  jp: {r['jp'] or '-'}  reading: {r['reading'] or '-'}  zh: {r['zh'] or '-'}")
+        if r["explain"]:
+            print(f"  explain: {r['explain']}")
+        if r["gist"]:
+            print(f"  gist: {r['gist']}")
+        if r["probe"]:
+            print(f"  probe: {r['probe']}（刻意放入的未知元素，不要提示使用者）")
 
 
-def round_count(con):
-    """本輪（上一個手動 checkpoint 之後）已作答題數。"""
-    last = con.execute("SELECT ts FROM checkpoints WHERE kind='manual' ORDER BY id DESC LIMIT 1").fetchone()
-    return con.execute("SELECT COUNT(*) FROM attempts WHERE ts>?", (last["ts"] if last else 0,)).fetchone()[0]
+ROUND_FLOW = ("流程：一次只出一題（只給題幹與選項）→ 依答案與判分準則判斷 → 回饋並出下一題 → "
+              "回覆的最後呼叫 `record` 寫入剛答完的那題，寫完不再加文字。")
 
 
-def cmd_next(con, args):
+def cmd_round(con, args):
     ts = now_ts()
-    if meta(con, "round_closed") == "1":
-        if not args.new_round:
-            print("ROUND_CLOSED: 上一輪已在 checkpoint 結束。不要出題：先向使用者回報並等待指示。"
-                  "使用者明確說要繼續／開始下一輪後，才執行 `next --new-round`。"
-                  "若 checkpoint 的 next_focus 需要新題，先走 generator → reviewer → import。")
-            return
-        set_meta(con, "round_closed", "0")
+    r = open_round(con)
+    if args.action == "status":
+        if r:
+            print(f"round {r['id']}: 已記錄 {r['recorded']}/{r['planned']}" +
+                  (f"，下一題 seq {r['next_seq']}" if r["next_seq"] else "（全部記錄完，待手動 checkpoint）"))
+        else:
+            print("沒有進行中的一輪")
+        return
+    if args.action == "add":
+        if not r:  # 沒有進行中的一輪：與 round start 相同的閘門，開一個空的一輪再加題
+            if con.execute("SELECT 1 FROM rounds").fetchone() and not args.new_round:
+                raise SystemExit("沒有進行中的一輪；使用者明確說要開始後才加 --new-round")
+            con.execute("INSERT INTO rounds(session_id,started_ts,planned) VALUES(?,?,0)",
+                        (current_session(con, create=True), ts))
+            r = open_round(con)
+        it = con.execute("SELECT * FROM items WHERE key=?", (args.key,)).fetchone()
+        if not it:
+            raise SystemExit(f"no such item: {args.key}")
+        seq = con.execute("SELECT COALESCE(MAX(seq),0)+1 FROM presentations WHERE round_id=?", (r["id"],)).fetchone()[0]
+        _present(con, it, current_session(con, create=True), r["id"], seq, ts)
+        con.execute("UPDATE rounds SET planned=planned+1 WHERE id=?", (r["id"],))
         con.commit()
-    done, cap = round_count(con), int(meta(con, "round_max"))
-    if done >= cap:
-        print(f"ROUND_LIMIT: 本輪已作答 {done} 題（上限 {cap}）。停止出題：做手動 checkpoint、回報結果，等使用者指示。")
+        print(f"added seq {seq}")
+        print_cards(con, r["id"])
         return
-    args.n = min(args.n, cap - done)
-    print(f"round: 已作答 {done}/{cap}")
-    pairs = candidate_pairs(con, ts)
-    last_kind, last_task = last_shown(con)
-    sid = current_session(con, create=True)
-    kinds = {r["unit"]: r["kind"] for r in con.execute("SELECT unit, kind FROM units")}
-    taken, n = set(), 0
-    for _ in range(args.n):
-        pool = [p for p in pairs if p[0] not in taken]
-        if not pool:
-            break
-        head = pool[:6]
-        pick = next((p for p in head if kinds[p[0]] != last_kind), None) if last_kind else None
-        if pick is None:  # 交錯：類型都相同時，至少換題型
-            pick = next((p for p in head if pick_item(con, *p, last_task)["task"] != last_task), head[0])
-        it = pick_item(con, pick[0], pick[1], last_task)
-        present(con, it, sid)
-        taken.add(pick[0])
-        last_kind, last_task = kinds[pick[0]], it["task"]
-        n += 1
-    con.commit()
-    if not n:
-        print("NO_ITEMS: 目前沒有到期或新的題目。請依 rules/subagent-policy.md 讓 generator 產出下一輪"
+    # start
+    if r:
+        if r["next_seq"]:
+            print(f"ROUND_OPEN: 第 {r['id']} 輪進行中，已記錄 {r['recorded']}/{r['planned']}，從 seq {r['next_seq']} 接續"
+                  "（已作答但沒寫入的題，能從對話還原就先 record 補寫）。剩下的題：")
+            print_cards(con, r["id"])
+            print(ROUND_FLOW)
+        else:
+            print(f"ROUND_COMPLETE: 第 {r['id']} 輪已全部記錄。做手動 checkpoint 結束本輪、回報，等使用者指示。")
+        return
+    last = con.execute("SELECT closed_ts FROM rounds ORDER BY id DESC LIMIT 1").fetchone()
+    if last and not args.new_round:
+        print("ROUND_CLOSED: 上一輪已在 checkpoint 結束。不要出題：先向使用者回報並等待指示。"
+              "使用者明確說要開始／繼續後，才執行 `round start --new-round`。"
+              "若未作答的題不夠一輪且 next_focus 需要新題，先走 generator → reviewer → import。")
+        return
+    cap = int(meta(con, "round_max"))
+    n = min(args.n or cap, cap)
+    plan, fresh_ids = plan_round(con, n, ts)
+    if not plan:
+        print("NO_ITEMS: 目前沒有到期或未作答的題目。請依 rules/subagent-policy.md 讓 generator 產出下一輪"
               "（可參考 `jl.py variants`），或 `jl.py stage <n>` 前進階段。")
-
-
-def cmd_present(con, args):
-    it = con.execute("SELECT * FROM items WHERE key=?", (args.key,)).fetchone()
-    if not it:
-        raise SystemExit(f"no such item: {args.key}")
-    present(con, it, current_session(con, create=True))
-    con.commit()
-
-
-# --------------------------------------------------------------------------- 作答
-def _feedback(con, it):
-    answers = json.loads(it["answers"])
-    u = con.execute("SELECT gist FROM units WHERE unit=?", (it["unit"],)).fetchone()
-    print("--- 回饋素材")
-    if answers:
-        print(f"正解: {answers[0]}   可接受: {' / '.join(answers)}")
-    print(f"jp: {it['jp']}  reading: {it['reading']}  zh: {it['zh']}")
-    print(f"explain: {it['explain']}")
-    if u and u["gist"]:
-        print(f"gist: {u['gist']}")
-
-
-def _parse_tags(s):
-    tags = [t.strip() for t in (s or "").split(",") if t.strip()]
-    bad = [t for t in tags if t not in TAGS]
-    if bad:
-        raise SystemExit(f"未知 tag：{bad}（可用：{', '.join(TAGS)}）")
-    return tags
-
-
-def cmd_answer(con, args):
-    p = con.execute("SELECT * FROM presentations WHERE id=?", (args.presentation_id,)).fetchone()
-    if not p:
-        raise SystemExit(f"no such presentation: {args.presentation_id}")
-    done = con.execute("SELECT id FROM attempts WHERE presentation_id=?", (p["id"],)).fetchone()
-    if done:
-        raise SystemExit(f"presentation {p['id']} 已作答（attempt {done['id']}）；自述請用 `jl.py report`")
-    it = con.execute("SELECT i.*, u.kind AS unit_kind FROM items i JOIN units u ON u.unit=i.unit WHERE i.id=?",
-                     (p["item_id"],)).fetchone()
-    tt = con.execute("SELECT * FROM task_types WHERE task=?", (it["task"],)).fetchone()
-    raw = " ".join(args.answer)
-    shown = json.loads(p["shown_choices"]) if p["shown_choices"] else None
-    # 讀音題與產出題：題目的假名讀音也算可接受寫法（羅馬字作答才能對上漢字答案）
-    extra = [it["reading"]] if it["reading"] and (it["task"] == "reading" or tt["skill"] == "produce") else []
-    g = grade_answer(it, raw, shown, extra)
-    tags = _parse_tags(args.tags)
-    picked = args.pick or (g["matched"] if shown else None)
-
-    if args.outcome:
-        outcome, gres = args.outcome, "judged"
-    elif g["result"] == "unknown":
-        outcome, gres = "skipped", "unknown"
-    elif g["result"] == "correct" and tt["grading"] != "judge":
-        outcome, gres = "correct", g["how"]
-    elif g["result"] == "incorrect" and tt["grading"] == "auto":
-        outcome, gres = "incorrect", "mismatch"
-    else:
-        reason = {"ambiguous": "無法自動判定", "incorrect": "與核心答案不同，需依自然度判斷"}.get(g["result"], "需判斷")
-        print(f"NEEDS_JUDGMENT: {reason}（尚未寫入）")
-        print(f"task: {it['task']}（{tt['description']}）")
-        print(f"使用者作答: {raw}")
-        _feedback(con, it)
-        safe = raw.replace('"', "'")
-        print(f'rerun: python tools/jl.py answer {p["id"]} "{safe}" --outcome correct|incorrect [--tags {",".join(TAGS[:3])},...]'
-              + (' [--pick "<選項>"]' if shown else ""))
         return
+    sid = current_session(con, create=True)
+    rid = con.execute("INSERT INTO rounds(session_id,started_ts,planned) VALUES(?,?,?)", (sid, ts, len(plan))).lastrowid
+    for seq, it in enumerate(plan, 1):
+        _present(con, it, sid, rid, seq, ts)
+    con.commit()
+    n_new = sum(1 for it in plan if it["id"] in fresh_ids)
+    print(f"ROUND {rid} 開始：{len(plan)} 題（新題 {n_new}）。以下是給 AI 的題目資料，含答案、判分準則與 probe，"
+          "不要讓使用者看到。")
+    print_cards(con, rid)
+    total, _ = unseen_summary(con)
+    print(f"本輪之後仍未作答過的題：{total - n_new}")
+    print(ROUND_FLOW)
 
-    picked_unit = None
-    if picked and it["choice_units"] and it["choices"]:
-        cmap = dict(zip(json.loads(it["choices"]), json.loads(it["choice_units"])))
-        picked_unit = cmap.get(picked)
-    ts = now_ts()
+
+def _check_enum(val, allowed, label, seq):
+    if val is not None and val not in allowed:
+        raise SystemExit(f"[record] seq {seq}: {label}={val!r} 不在 {allowed}")
+
+
+def _validate_entry(e):
+    seq = e.get("seq")
+    _check_enum(e.get("outcome"), OUTCOMES, "outcome", seq)
+    _check_enum(e.get("confidence"), CONFIDENCES, "confidence", seq)
+    _check_enum(e.get("basis"), BASES, "basis", seq)
+    _check_enum(e.get("miss"), MISSES, "miss", seq)
+    for t in e.get("tags") or []:
+        _check_enum(t, TAGS, "tag", seq)
+    aft = e.get("after") or {}
+    _check_enum(aft.get("confidence"), CONFIDENCES + (NONE,), "after.confidence", seq)
+    _check_enum(aft.get("basis"), BASES + (NONE,), "after.basis", seq)
+    _check_enum(aft.get("miss"), MISSES + (NONE,), "after.miss", seq)
+    for s in e.get("seen") or []:
+        if not s.get("term"):
+            raise SystemExit(f"[record] seq {seq}: seen 需要 term")
+        _check_enum(s.get("kind") or "word", ENCOUNTER_KINDS, "seen.kind", seq)
+        _check_enum(s.get("where") or "prompt", ENCOUNTER_LOCATIONS, "seen.where", seq)
+
+
+def cmd_record(con, args):
+    raw = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        raise SystemExit(f"[record] JSON 解析失敗：{e}")
+    entries = [data] if isinstance(data, dict) else data
+    r = open_round(con)
+    if not r:
+        raise SystemExit("[record] 沒有進行中的一輪（round start）")
+    pres, seen_seq = [], set()
+    for e in entries:
+        seq = e.get("seq")
+        if not isinstance(seq, int) or seq in seen_seq:
+            raise SystemExit(f"[record] seq 缺少、不是整數或重複：{seq!r}")
+        seen_seq.add(seq)
+        if not e.get("outcome"):
+            raise SystemExit(f"[record] seq {seq}: 需要 outcome（correct|incorrect|skipped，由你判斷）")
+        _validate_entry(e)
+        p = con.execute("SELECT * FROM presentations WHERE round_id=? AND seq=?", (r["id"], seq)).fetchone()
+        if not p:
+            raise SystemExit(f"[record] 本輪沒有 seq {seq}")
+        done = con.execute("SELECT id FROM attempts WHERE presentation_id=?", (p["id"],)).fetchone()
+        if done:
+            raise SystemExit(f"[record] seq {seq} 已記錄（attempt {done['id']}）；更正請用 `jl.py report --attempt {done['id']}`")
+        pres.append((e, p))
     cfg = cfg_of(con)
     sid = current_session(con, create=True)
-    cur = con.execute("""INSERT INTO attempts(item_id,unit,presentation_id,ts,learn_day,session_id,outcome,answer_mode,
-                         user_answer,picked_text,picked_unit,grade_result,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                      (it["id"], it["unit"], p["id"], ts, learn_day(ts, cfg["day_start_hour"]), sid, outcome,
-                       g["mode"], raw, picked, picked_unit, gres, args.note))
-    aid = cur.lastrowid
-    if args.confidence or args.basis or args.miss:
-        con.execute("INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis,miss) VALUES(?,?,?,?,?,?)",
-                    (aid, ts, "with_answer", args.confidence, args.basis, args.miss))
-    con.executemany("INSERT INTO attempt_tags(attempt_id,tag) VALUES(?,?)", [(aid, t) for t in tags])
-    refresh_unit(con, it["unit"], cfg)
+    ts = now_ts()
+    out, extra_lines, units = [], [], {}
+    for e, p in pres:
+        it = con.execute("SELECT i.*, u.kind AS unit_kind FROM items i JOIN units u ON u.unit=i.unit WHERE i.id=?",
+                         (p["item_id"],)).fetchone()
+        tt = con.execute("SELECT * FROM task_types WHERE task=?", (it["task"],)).fetchone()
+        ans = str(e.get("answer") or "")
+        shown = json.loads(p["shown_choices"]) if p["shown_choices"] else None
+        extra = [it["reading"]] if it["reading"] and (it["task"] == "reading" or tt["skill"] == "produce") else []
+        g = grade_answer(it, ans, shown, extra)
+        outcome = e["outcome"]
+        if tt["grading"] == "auto":  # 答案有限的題型：程式判分當稽核
+            gres = {"correct": g["how"] or "exact", "incorrect": "mismatch", "unknown": "unknown"}.get(g["result"], "judged")
+            audit = g["result"] in ("correct", "incorrect") and (g["result"] == "correct") != (outcome == "correct")
+        else:
+            gres, audit = ("unknown" if g["result"] == "unknown" else "judged"), False
+        picked = e.get("pick") or (g["matched"] if shown else None)
+        picked_unit = None
+        if picked and it["choice_units"] and it["choices"]:
+            picked_unit = dict(zip(json.loads(it["choices"]), json.loads(it["choice_units"]))).get(picked)
+        aid = con.execute("""INSERT INTO attempts(item_id,unit,presentation_id,ts,learn_day,session_id,outcome,answer_mode,
+                             user_answer,picked_text,picked_unit,grade_result,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                          (it["id"], it["unit"], p["id"], ts, learn_day(ts, cfg["day_start_hour"]), sid, outcome,
+                           g["mode"], ans, picked, picked_unit, gres, e.get("note"))).lastrowid
+        if audit:
+            extra_lines.append(f"AUDIT seq {p['seq']}: 程式判 {g['result']}（作答 {g['matched'] or ans}；"
+                               f"正解 {' / '.join(json.loads(it['answers']))}），你判 {outcome}。"
+                               f"確認後若要改判：`jl.py report --attempt {aid} --outcome ...`")
+        if e.get("confidence") or e.get("basis") or e.get("miss"):
+            con.execute("INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis,miss) VALUES(?,?,?,?,?,?)",
+                        (aid, ts, "with_answer", e.get("confidence"), e.get("basis"), e.get("miss")))
+        aft = e.get("after") or {}
+        if any(aft.get(k) for k in ("confidence", "basis", "miss", "note")):
+            con.execute("""INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis,miss,note)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (aid, ts, "after_feedback", aft.get("confidence"), aft.get("basis"), aft.get("miss"),
+                         aft.get("note")))
+        con.executemany("INSERT OR IGNORE INTO attempt_tags(attempt_id,tag) VALUES(?,?)",
+                        [(aid, t) for t in e.get("tags") or []])
+        for s in e.get("seen") or []:
+            eid, verb = add_encounter(con, s["term"], s.get("kind") or "word", aid, s.get("where") or "prompt",
+                                      s.get("reading"), s.get("zh"), s.get("unit"), s.get("note"))
+            extra_lines.append(f"seen: {s['term']}（{verb} encounter {eid}）")
+        if picked_unit and picked_unit != it["unit"] and outcome == "incorrect":
+            pair = "|".join(sorted({it["unit"], picked_unit}))
+            n = con.execute("""SELECT COUNT(*) FROM attempts WHERE (unit=? AND picked_unit=?) OR (unit=? AND picked_unit=?)""",
+                            (it["unit"], picked_unit, picked_unit, it["unit"])).fetchone()[0]
+            c = con.execute("SELECT id FROM confusions WHERE pair_key=?", (pair,)).fetchone()
+            extra_lines.append(f"CONFUSION_CANDIDATE: {pair}（累計 {n} 次，attempt {aid}）"
+                               + (f" 已有 confusion {c['id']}" if c else ""))
+        units[it["unit"]] = True
+        out.append((p["seq"], aid, it["key"], it["unit"], tt["skill"], outcome, gres))
+    for u in units:
+        refresh_unit(con, u, cfg)
     con.commit()
-
-    st = con.execute("SELECT * FROM unit_state WHERE unit=? AND skill=?", (it["unit"], tt["skill"])).fetchone()
-    print(f"recorded: attempt {aid}  outcome={outcome}  ({gres})  mode={g['mode']}"
-          + (f"  miss={args.miss}" if args.miss and outcome != "correct" else ""))
-    if picked:
-        print(f"picked: {picked}" + (f"  (unit {picked_unit})" if picked_unit else ""))
-    if g["near"] and outcome == "incorrect":
-        print("near_miss: yes（接近正解）")
-    _feedback(con, it)
-    print(f"state: {it['unit']}/{tt['skill']} tier={st['tier']} S={st['stability_days']:.2f}d next_due={fmt_ts(st['due_ts'])}")
-    if picked_unit and picked_unit != it["unit"] and outcome == "incorrect":
-        pair = "|".join(sorted({it["unit"], picked_unit}))
-        n = con.execute("""SELECT COUNT(*) FROM attempts WHERE (unit=? AND picked_unit=?) OR (unit=? AND picked_unit=?)""",
-                        (it["unit"], picked_unit, picked_unit, it["unit"])).fetchone()[0]
-        c = con.execute("SELECT id FROM confusions WHERE pair_key=?", (pair,)).fetchone()
-        print(f"CONFUSION_CANDIDATE: {pair}（累計 {n} 次）" + (f" 已有 confusion {c['id']}" if c else ""))
+    for seq, aid, key, unit, skill, outcome, gres in out:
+        st = con.execute("SELECT tier, stability_days, due_ts FROM unit_state WHERE unit=? AND skill=?",
+                         (unit, skill)).fetchone()
+        print(f"[{seq}] attempt {aid} {key} → {outcome}（{gres}）  {unit}/{skill} "
+              f"tier={st['tier']} S={st['stability_days']:.2f}d due={fmt_ts(st['due_ts'])}")
+    for line in extra_lines:
+        print(line)
+    r = open_round(con)
+    if r["next_seq"]:
+        print(f"本輪：已記錄 {r['recorded']}/{r['planned']}，下一題 seq {r['next_seq']}")
+    else:
+        print(f"ROUND_COMPLETE: 本輪 {r['planned']} 題已全部記錄。做手動 checkpoint 結束本輪、回報，等使用者指示。")
 
 
 def cmd_report(con, args):
-    if not (args.confidence or args.basis or args.note or args.miss):
-        raise SystemExit("至少要給 --confidence、--basis、--miss 或 --note 其中之一")
+    if not (args.confidence or args.basis or args.note or args.miss or args.outcome):
+        raise SystemExit("至少要給 --confidence、--basis、--miss、--outcome 或 --note 其中之一")
+    phase = "correction" if args.outcome else args.phase
     if args.attempt:
         a = con.execute("SELECT id, unit FROM attempts WHERE id=?", (args.attempt,)).fetchone()
     else:
@@ -1258,13 +1359,14 @@ def cmd_report(con, args):
              if sid else None) or con.execute("SELECT id, unit FROM attempts ORDER BY id DESC LIMIT 1").fetchone()
     if not a:
         raise SystemExit("找不到作答紀錄")
-    con.execute("INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis,note,miss) VALUES(?,?,?,?,?,?,?)",
-                (a["id"], now_ts(), args.phase, args.confidence, args.basis, args.note, args.miss))
+    con.execute("""INSERT INTO attempt_reports(attempt_id,ts,phase,confidence,basis,note,miss,outcome)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (a["id"], now_ts(), phase, args.confidence, args.basis, args.note, args.miss, args.outcome))
     refresh_unit(con, a["unit"])
     con.commit()
     e = con.execute("SELECT confidence, basis, miss, outcome FROM v_attempt_effective WHERE id=?", (a["id"],)).fetchone()
-    print(f"reported attempt {a['id']} ({args.phase}): confidence={e['confidence']} basis={e['basis']} miss={e['miss']}"
-          f"；已重算 {a['unit']}")
+    print(f"reported attempt {a['id']} ({phase}): outcome={e['outcome']} confidence={e['confidence']} "
+          f"basis={e['basis']} miss={e['miss']}；已重算 {a['unit']}")
     if e["miss"] and e["outcome"] == "correct":
         print("注意：miss 只對答錯/跳過有作用，這筆是答對，排程不受影響")
 
@@ -1295,9 +1397,14 @@ def cmd_weak(con, args):
     for r in con.execute("""SELECT task, COUNT(*) n, SUM(outcome='correct') ok FROM
                             (SELECT * FROM v_attempt_effective ORDER BY id DESC LIMIT 50) GROUP BY task"""):
         print(f"  {r['task']}: {r['ok']}/{r['n']}")
-    tags = con.execute("SELECT tag, SUM(n) n FROM v_tag_counts GROUP BY tag ORDER BY n DESC LIMIT 5").fetchall()
+    tags = con.execute("""SELECT tag, SUM(n) n FROM v_tag_counts WHERE outcome!='correct'
+                          GROUP BY tag ORDER BY n DESC LIMIT 5""").fetchall()
     if tags:
         print("== 錯誤 tag：" + "  ".join(f"{r['tag']}×{r['n']}" for r in tags))
+    off = con.execute("""SELECT tag, SUM(n) n FROM v_tag_counts WHERE outcome='correct'
+                         GROUP BY tag ORDER BY n DESC LIMIT 5""").fetchall()
+    if off:
+        print("== 考點以外的錯（答對題上的 tag）：" + "  ".join(f"{r['tag']}×{r['n']}" for r in off))
     if args.detail:
         print("== 最近錯誤（作答 vs 正解）")
         for r in con.execute("SELECT * FROM v_recent_errors ORDER BY attempt_id DESC LIMIT 15"):
@@ -1311,7 +1418,7 @@ def cmd_stats(con, args):
         "SELECT status, COUNT(*) n FROM v_unit_status WHERE active GROUP BY status")})
     print("tier (unit×skill):", {f"{r['skill']}/{r['tier']}": r["n"] for r in con.execute(
         "SELECT skill, tier, COUNT(*) n FROM unit_state GROUP BY skill, tier")})
-    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts").fetchone()
+    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM v_attempt_effective").fetchone()
     print(f"attempts total: {r['n']}  correct: {r['ok'] or 0}")
     print("correct by confidence:", {(x["c"] or "unreported"): x["n"] for x in con.execute(
         "SELECT confidence c, COUNT(*) n FROM v_attempt_effective WHERE outcome='correct' GROUP BY confidence")})
@@ -1319,7 +1426,8 @@ def cmd_stats(con, args):
         "SELECT basis b, COUNT(*) n FROM v_attempt_effective WHERE outcome='correct' GROUP BY basis")})
     sid = current_session(con)
     if sid:
-        r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts WHERE session_id=?", (sid,)).fetchone()
+        r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM v_attempt_effective WHERE session_id=?",
+                        (sid,)).fetchone()
         print(f"session {sid}: {r['n']} attempts, {r['ok'] or 0} correct")
     print("items active:", con.execute("SELECT COUNT(*) FROM items WHERE retired IS NULL").fetchone()[0],
           " stage:", meta(con, "stage"))
@@ -1340,7 +1448,14 @@ def cmd_resume(con, args):
     sid = current_session(con) if source in ("compact", "resume") else None
     sid = sid or new_session(con)
     if args.hook:
+        set_meta(con, "last_hook_ts", now_ts())
+        set_meta(con, "last_hook_source", source)
+        con.commit()
         print(f"[jl resume：由 SessionStart hook 自動執行（source={source}），學習狀態如下]")
+    else:
+        h = meta(con, "last_hook_ts")
+        last = f"{fmt_ts(float(h))}，{meta(con, 'last_hook_source')}" if h else "從未執行"
+        print(f"（手動執行 resume；上次 SessionStart hook：{last}）")
     print(f"session: {sid}   stage: {meta(con, 'stage')}")
     man = con.execute("SELECT * FROM checkpoints WHERE kind='manual' ORDER BY id DESC LIMIT 1").fetchone()
     auto = con.execute("SELECT * FROM checkpoints WHERE kind='auto' ORDER BY id DESC LIMIT 1").fetchone()
@@ -1351,6 +1466,15 @@ def cmd_resume(con, args):
         print("last checkpoint: (none)")
     if auto and (not man or auto["ts"] > man["ts"]):
         print(f"auto checkpoint ({fmt_ts(auto['ts'])}): {auto['summary']}")
+    li = meta(con, "last_import")
+    if li:
+        li = json.loads(li)
+        if not man or li["ts"] > man["ts"]:
+            print(f"注意：上次 checkpoint 之後已匯入 {li['source']}（{li['n']} 題）。next_focus 若寫需要新題，"
+                  "那批題已經備好，不要重新出題。")
+    total, by_src = unseen_summary(con)
+    print(f"未作答過的題：{total}" + (f"（{by_src}）" if total else "") +
+          f"；一輪 {meta(con, 'round_max')} 題。未作答的題夠一輪時不出新題。")
     cmd_stats(con, args)
     cmd_due(con, args)
     if con.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]:
@@ -1371,19 +1495,23 @@ def cmd_resume(con, args):
     npk = con.execute("SELECT COUNT(*) FROM v_parked").fetchone()[0]
     if npk:
         print(f"暫停出題的題目 {npk} 題（jl.py sql \"SELECT * FROM v_parked\"）")
-    closed = meta(con, "round_closed") == "1"
-    print(f"本輪：{'已結束（等使用者說開始／繼續才用 next --new-round）' if closed else f'進行中，已作答 {round_count(con)}'}"
-          f"／上限 {meta(con, 'round_max')} 題")
-    print("流程：next → answer <presentation> \"<作答>\"（NEEDS_JUDGMENT 時判斷後加 --outcome --tags）→ 回饋 → 有自述就 report。"
-          "一輪結束（手動 checkpoint 或 ROUND_LIMIT）即停止出題，回報後等使用者指示；next_focus 需要新題時先走 generator 流程。")
+    r = open_round(con)
+    if r:
+        nxt = (f"，下一題 seq {r['next_seq']}（`round start` 會列出剩下的題）" if r["next_seq"]
+               else "，全部記錄完，待手動 checkpoint")
+        print(f"本輪：第 {r['id']} 輪進行中，已記錄 {r['recorded']}/{r['planned']}{nxt}")
+    else:
+        print("本輪：沒有進行中的一輪（使用者說開始／繼續後才 `round start --new-round`）")
+    print("流程：round start 排好整輪 → 一次出一題、AI 判斷並回饋 → 回覆最後 `record` 寫入剛答完的題 → "
+          "全部記錄完做手動 checkpoint，回報後等使用者指示。")
 
 
 def auto_summary(con, since):
-    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts WHERE ts>?", (since,)).fetchone()
+    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM v_attempt_effective WHERE ts>?", (since,)).fetchone()
     if not r["n"]:
         return None
     parts = [f"自上次 checkpoint {r['n']} 題，答對 {r['ok'] or 0}"]
-    miss = [x["unit"] for x in con.execute("""SELECT unit, COUNT(*) n FROM attempts WHERE ts>? AND outcome!='correct'
+    miss = [x["unit"] for x in con.execute("""SELECT unit, COUNT(*) n FROM v_attempt_effective WHERE ts>? AND outcome!='correct'
                                               GROUP BY unit ORDER BY n DESC LIMIT 6""", (since,))]
     if miss:
         parts.append("錯/跳過：" + ",".join(miss))
@@ -1420,19 +1548,29 @@ def cmd_checkpoint(con, args):
         if not args.summary:
             raise SystemExit("需要 --summary（或用 --auto）")
         summary, nxt, kind = args.summary, args.next, "manual"
-    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM attempts WHERE ts>?", (since,)).fetchone()
+    r = con.execute("SELECT COUNT(*) n, SUM(outcome='correct') ok FROM v_attempt_effective WHERE ts>?", (since,)).fetchone()
     con.execute("INSERT INTO checkpoints(session_id,ts,kind,summary,next_focus) VALUES(?,?,?,?,?)",
                 (sid, now_ts(), kind, summary, nxt))
     con.execute("UPDATE sessions SET ended_ts=? WHERE id=?", (now_ts(), sid))
+    dropped = 0
     if kind == "manual":
-        set_meta(con, "round_closed", "1")
+        rr = open_round(con)
+        if rr:
+            dropped = rr["planned"] - rr["recorded"]
+            con.execute("UPDATE rounds SET closed_ts=? WHERE id=?", (now_ts(), rr["id"]))
     con.commit()
     print(f"checkpoint ({kind}) saved (session {sid}). 自上次 checkpoint：{r['n']} 題，答對 {r['ok'] or 0}。")
     if kind == "manual":
-        print("ROUND_CLOSED: 本輪已結束。停止出題，回報答對率、錯最多的類型與下一輪建議，等使用者明確說繼續。")
+        print("ROUND_CLOSED: 本輪已結束。停止出題，回報答對率、錯最多的類型與下一輪建議，等使用者明確說繼續。"
+              + (f"（本輪 {dropped} 題未記錄，已捨棄）" if dropped else ""))
 
 
 def cmd_variants(con, args):
+    total, by_src = unseen_summary(con)
+    print(f"未作答過的題：{total}" + (f"（{by_src}）" if total else "") + "。出新題前先看這些題涵蓋了哪些 unit，避免重複：")
+    for r in con.execute("""SELECT v.key, v.unit, v.task, i.scenario FROM v_unseen_items v JOIN items i ON i.id=v.item_id
+                            ORDER BY v.item_id"""):
+        print(f"  {r['key']} [{r['unit']}/{r['task']}] {r['scenario'] or ''}")
     rows = con.execute("""SELECT v.*, u.gist, u.jp, u.zh FROM v_variants_needed v JOIN units u ON u.unit=v.unit
                           ORDER BY v.unit""").fetchall()
     print(f"需要新情境變體：{len(rows)} 組（該 skill 的每題都已在 2 個學習日答對，但尚未鞏固）")
@@ -1562,17 +1700,23 @@ def cmd_item(con, args):
         print(f"unparked {args.key}")
         return
     changes = {}
-    if args.add_answer or args.remove_answer:
-        ans = json.loads(it["answers"])
+    if args.set_answers or args.add_answer or args.remove_answer:
+        ans = json.loads(args.set_answers) if args.set_answers else json.loads(it["answers"])
+        if not isinstance(ans, list) or not all(isinstance(a, str) for a in ans):
+            raise SystemExit("--set-answers 必須是字串的 JSON list")
         ans += [a for a in args.add_answer or [] if a not in ans]
         ans = [a for a in ans if a not in (args.remove_answer or [])]
         if it["choices"] and not any(a in json.loads(it["choices"]) for a in ans):
             raise SystemExit("選擇式題目的 answers 必須出現在 choices 中")
         changes["answers"] = json.dumps(ans, ensure_ascii=False)
-    for f in ("explain", "zh", "reading", "prompt"):
+    for f in ("explain", "zh", "reading", "prompt", "judge", "probe"):
         v = getattr(args, f)
         if v is not None:
             changes[f] = v
+    if "answers" in changes and not it["choices"]:
+        skill = con.execute("SELECT skill FROM task_types WHERE task=?", (it["task"],)).fetchone()["skill"]
+        if skill == "produce" and len(json.loads(changes["answers"])) > MAX_PRODUCE_ANSWERS:
+            raise SystemExit(f"產出題的 answers 最多 {MAX_PRODUCE_ANSWERS} 個參考答案；可接受範圍寫在 --judge")
     if not changes:
         raise SystemExit("沒有要修改的欄位")
     for f, v in changes.items():
@@ -1582,31 +1726,36 @@ def cmd_item(con, args):
     print(f"edited {args.key}: {', '.join(changes)}")
 
 
+def add_encounter(con, term, kind, attempt_id, where="prompt", reading=None, zh=None, unit=None, note=None):
+    """記一筆題目中看到但不認識的元素；同 term 再加會累計並補連結。回傳 (id, created|updated)。"""
+    if not con.execute("SELECT 1 FROM attempts WHERE id=?", (attempt_id,)).fetchone():
+        raise SystemExit(f"attempt 不存在：{attempt_id}")
+    if unit and not con.execute("SELECT 1 FROM units WHERE unit=?", (unit,)).fetchone():
+        raise SystemExit(f"unit 不存在：{unit}")
+    ts = now_ts()
+    row = con.execute("SELECT * FROM encounters WHERE term=?", (term,)).fetchone()
+    if row:
+        eid = row["id"]
+        new_link = not con.execute("SELECT 1 FROM encounter_attempts WHERE encounter_id=? AND attempt_id=?",
+                                   (eid, attempt_id)).fetchone()
+        con.execute("""UPDATE encounters SET seen_count=seen_count+?, last_seen=?, reading=COALESCE(reading,?),
+                       zh=COALESCE(zh,?), unit=COALESCE(unit,?), note=COALESCE(?,note) WHERE id=?""",
+                    (1 if new_link else 0, ts, reading, zh, unit, note, eid))
+        verb = "updated"
+    else:
+        eid = con.execute("""INSERT INTO encounters(term,reading,zh,kind,first_seen,last_seen,unit,note)
+                             VALUES(?,?,?,?,?,?,?,?)""", (term, reading, zh, kind, ts, ts, unit, note)).lastrowid
+        verb = "created"
+    con.execute("INSERT OR IGNORE INTO encounter_attempts(encounter_id,attempt_id,location) VALUES(?,?,?)",
+                (eid, attempt_id, where))
+    return eid, verb
+
+
 def cmd_seen(con, args):
     """題目（題幹/選項）中看到但不認識的元素。答不出考點本身不記這裡。"""
     if args.action == "add":
-        a = con.execute("SELECT id FROM attempts WHERE id=?", (args.attempt,)).fetchone()
-        if not a:
-            raise SystemExit(f"attempt 不存在：{args.attempt}")
-        if args.unit and not con.execute("SELECT 1 FROM units WHERE unit=?", (args.unit,)).fetchone():
-            raise SystemExit(f"unit 不存在：{args.unit}")
-        ts = now_ts()
-        row = con.execute("SELECT * FROM encounters WHERE term=?", (args.term,)).fetchone()
-        if row:
-            eid = row["id"]
-            new_link = not con.execute("SELECT 1 FROM encounter_attempts WHERE encounter_id=? AND attempt_id=?",
-                                       (eid, args.attempt)).fetchone()
-            con.execute("""UPDATE encounters SET seen_count=seen_count+?, last_seen=?, reading=COALESCE(reading,?),
-                           zh=COALESCE(zh,?), unit=COALESCE(unit,?), note=COALESCE(?,note) WHERE id=?""",
-                        (1 if new_link else 0, ts, args.reading, args.zh, args.unit, args.note, eid))
-            verb = "updated"
-        else:
-            eid = con.execute("""INSERT INTO encounters(term,reading,zh,kind,first_seen,last_seen,unit,note)
-                                 VALUES(?,?,?,?,?,?,?,?)""",
-                              (args.term, args.reading, args.zh, args.kind, ts, ts, args.unit, args.note)).lastrowid
-            verb = "created"
-        con.execute("INSERT OR IGNORE INTO encounter_attempts(encounter_id,attempt_id,location) VALUES(?,?,?)",
-                    (eid, args.attempt, args.where))
+        eid, verb = add_encounter(con, args.term, args.kind, args.attempt, args.where, args.reading, args.zh,
+                                  args.unit, args.note)
         con.commit()
         r = con.execute("SELECT * FROM v_encounters WHERE id=?", (eid,)).fetchone()
         print(f"{verb} encounter {eid}: {r['term']} seen={r['seen_count']} status={r['status']}")
@@ -1745,18 +1894,20 @@ def build_parser():
     p = sub.add_parser("resume")
     p.add_argument("--hook", action="store_true", help="由 SessionStart hook 呼叫（從 stdin 讀 source）")
     p.add_argument("--source", choices=("startup", "resume", "clear", "compact"))
-    p = sub.add_parser("next"); p.add_argument("-n", type=int, default=1)
-    p.add_argument("--new-round", action="store_true", help="使用者明確說要繼續後，開新一輪")
-    p = sub.add_parser("present"); p.add_argument("key")
-    p = sub.add_parser("answer"); p.add_argument("presentation_id", type=int); p.add_argument("answer", nargs="*")
-    p.add_argument("--outcome", choices=OUTCOMES); p.add_argument("--tags")
-    p.add_argument("--confidence", choices=CONFIDENCES); p.add_argument("--basis", choices=BASES)
-    p.add_argument("--pick"); p.add_argument("--note")
-    p.add_argument("--miss", choices=MISSES, help="答錯原因自述：slip 粗心/漏看、probe 卡在題目的未知元素、unreadable 整題看不懂")
+    p = sub.add_parser("round"); rs = p.add_subparsers(dest="action", required=True)
+    q = rs.add_parser("start", help="排好整輪並列出題目資料（給 AI）")
+    q.add_argument("-n", type=int); q.add_argument("--new-round", action="store_true",
+                                                   help="上一輪已 checkpoint 結束、使用者明確說開始／繼續後才加")
+    rs.add_parser("status")
+    q = rs.add_parser("add", help="把指定題目加到進行中的一輪（例如使用者要求重考）"); q.add_argument("key")
+    q.add_argument("--new-round", action="store_true")
+    p = sub.add_parser("record", help="從 stdin（或 --file）讀 JSON 寫入作答；見 tools/CLAUDE.md")
+    p.add_argument("--file")
     p = sub.add_parser("report"); p.add_argument("--attempt", type=int)
-    p.add_argument("--confidence", choices=CONFIDENCES); p.add_argument("--basis", choices=BASES)
-    p.add_argument("--miss", choices=MISSES)
-    p.add_argument("--note"); p.add_argument("--phase", choices=PHASES, default="after_feedback")
+    p.add_argument("--confidence", choices=CONFIDENCES + (NONE,)); p.add_argument("--basis", choices=BASES + (NONE,))
+    p.add_argument("--miss", choices=MISSES + (NONE,), help="答錯原因自述；none＝撤回")
+    p.add_argument("--outcome", choices=OUTCOMES, help="改判（寫成 phase=correction）")
+    p.add_argument("--note"); p.add_argument("--phase", choices=("with_answer", "after_feedback"), default="after_feedback")
     sub.add_parser("due")
     p = sub.add_parser("weak"); p.add_argument("--limit", type=int, default=10); p.add_argument("--detail", action="store_true")
     sub.add_parser("stats")
@@ -1779,8 +1930,9 @@ def build_parser():
     q.add_argument("--add-skill", choices=SKILLS, action="append")
     p = sub.add_parser("item"); its = p.add_subparsers(dest="action", required=True)
     q = its.add_parser("edit"); q.add_argument("key")
+    q.add_argument("--set-answers", help="整個替換 answers（JSON list）")
     q.add_argument("--add-answer", action="append"); q.add_argument("--remove-answer", action="append")
-    for f in ("explain", "zh", "reading", "prompt"):
+    for f in ("explain", "zh", "reading", "prompt", "judge", "probe"):
         q.add_argument(f"--{f}")
     q = its.add_parser("park"); q.add_argument("key"); q.add_argument("--reason", required=True)
     q = its.add_parser("unpark"); q.add_argument("key")
@@ -1808,8 +1960,8 @@ def build_parser():
 
 
 COMMANDS = {
-    "init": lambda c, a: print(f"ok. db={DB_PATH}"), "resume": cmd_resume, "next": cmd_next, "present": cmd_present,
-    "answer": cmd_answer, "report": cmd_report, "due": cmd_due, "weak": cmd_weak, "stats": cmd_stats,
+    "init": lambda c, a: print(f"ok. db={DB_PATH}"), "resume": cmd_resume, "round": cmd_round, "record": cmd_record,
+    "report": cmd_report, "due": cmd_due, "weak": cmd_weak, "stats": cmd_stats,
     "checkpoint": cmd_checkpoint, "import": cmd_import, "stage": cmd_stage, "rebuild": cmd_rebuild,
     "retire": cmd_retire, "variants": cmd_variants, "sql": cmd_sql, "schema": cmd_schema, "task": cmd_task,
     "unit": lambda c, a: cmd_unit(c, a), "item": cmd_item, "seen": cmd_seen, "confusion": cmd_confusion,

@@ -2,65 +2,81 @@
 
 ## 原則
 1. **先測驗，後講解**。不預先教內容；新項目直接以題目呈現。
-2. **每題立即回饋**。答完馬上告知對錯與正解，不延後（產出題也在當下判斷，不留到回合後）。
+2. **每題立即回饋**。答完馬上告知對錯與正解，不延後。
 3. **只對答錯／不知道的項目講解**；答對只用一行確認，不長篇稱讚。
 4. 永遠提供「不知道」選項（使用者可答「不知道」「?」「idk」）；不知道記為 `skipped` 並照常講解。
-5. 同一輪題型交錯混合；`next` 已自動交錯 unit 類型與題型。
+5. 同一輪題型交錯混合；`round start` 已自動交錯 unit 類型與題型，每個 unit 一輪只出一題。
 6. 目標是中高答對率而非全對；過易或過難時調整下一輪規格。
 
-## 一題的流程
-1. `python tools/jl.py next` 取得下一題：輸出 `presentation`（這次出題的 id）、題型 `task`、題幹與選項（已隨機排列）。不含答案。
-   要重考特定題目時用 `jl.py present <item_key>`。
-2. 向使用者出題：只呈現題幹（日文附假名）與選項。一次一題。
-   `next` 輸出的 `probe:` 行是刻意放入的未知元素，**只供你參考，不要提示使用者**，也不要替它加中文註解。
-3. 使用者作答後執行 `python tools/jl.py answer <presentation> "<使用者原文>"`，
-   使用者同時有自述就加 `--confidence`／`--basis`／`--miss`。
-   - 程式能確定對錯時（選擇題、讀音、完全符合核心答案、不知道）**直接寫入**，並輸出回饋素材與排程狀態。
-   - 輸出 `NEEDS_JUDGMENT` 時**尚未寫入**：由你依自然度判斷，再執行一次並加 `--outcome correct|incorrect`，答錯時加 `--tags`。
-     產出題（情境回應、翻譯、排序、挖空）只列核心答案，合理變體由你判斷可接受；意思題的中文說法也由你判斷。
-     選擇題若無法辨認選了哪個，加 `--pick "<選項原文>"`。
-   - 輸出 `CONFUSION_CANDIDATE` 表示選到另一個 unit 的誘答項，依下方「混淆對」決定是否建立。
-4. 依回饋素材（正解、explain、gist）回饋。
-5. **使用者在看完回饋後才補充**「其實是猜的」「是看前後文」「是粗心漏看」等，
-   執行 `python tools/jl.py report --confidence ..|--basis ..|--miss ..|--note "..."`（預設對最後一筆）。
-   自述另存一列、不改原作答，排程會依最新自述重算。
+## 一輪的流程
+1. **開始**：`python -X utf8 tools/jl.py round start`（上一輪已用 checkpoint 結束時加 `--new-round`，見「回合結構」）。
+   一次排好整輪，輸出每題的資料卡：`[seq]`、題幹、選項（已排好順序，字母固定）、答案或參考答案、`判分`（判分準則）、
+   jp／reading／zh、explain、gist、`probe`。**資料卡只給你看**：答案、判分準則、explain 都不能先讓使用者看到。
+2. **出題**：一次只出一題，只呈現題幹（日文附假名）與選項，照 seq 順序。
+   `probe` 是刻意放入的未知元素，**不要提示使用者**，也不要替它加中文註解。
+3. **判斷**：使用者作答後，由你依答案、判分準則、unit 的 gist 判斷 `correct`／`incorrect`／`skipped`。
+   - 產出題的參考答案只是例子，不是窮舉：意思和用法都合乎判分準則、在該情境自然，就是對的。
+   - **錯在考點以外**（例如考點是「駅で」，答對了但漏了時間的「に」）：考點記 `correct`，錯的地方照樣加 tag 並寫 note，
+     回饋時一句帶過更自然的說法。口語裡母語者本來就會省略的成分，在 casual 情境不算錯。
+   - 選擇題、讀音題的程式稽核（`AUDIT`）和你的判斷不一致時，再確認一次；確實判錯就用 `report --outcome` 改判。
+4. **回饋並出下一題**：同一則回覆裡先回饋，再出下一題。
+5. **寫入（後寫）**：在同一則回覆的**最後**呼叫 `record`，寫入剛答完的那一題，寫完就結束回覆，不再加文字。
+   這樣使用者看到下一題時不必等寫入。用 Bash 工具的 heredoc 傳 JSON（PowerShell 的管線會弄壞日文）：
+   ```
+   python -X utf8 tools/jl.py record <<'EOF'
+   [{"seq": 3, "answer": "<使用者原文>", "outcome": "incorrect", "tags": ["particle"], "note": "..."}]
+   EOF
+   ```
+   欄位：`seq`、`answer`（原文；選擇題填字母）、`outcome`（必填）、`tags`、`note`，
+   使用者自己說了才填的 `confidence`／`basis`／`miss`，
+   看完回饋才補充的自述放 `after`（`{"confidence"|"basis"|"miss"|"note": ..}`），
+   題目裡看不懂的詞放 `seen`（`[{"term", "kind", "where", "reading", "zh"}]`）。
+   輸出的 `CONFUSION_CANDIDATE` 依下方「混淆對」處理。
+6. 使用者在**之後幾題**才補充前面某題的自述，或要更正：`jl.py report --attempt <id> ...`（id 在 `record` 的輸出裡）。
+   自述另存一列、不改原作答；`--basis none` 這類寫法是撤回先前記錯的值；`--outcome` 是改判。
+7. **接續**：compact 或對話中斷後，`round start`（不加旗標）會回 `ROUND_OPEN` 並列出還沒寫入的題。
+   已經作答但沒寫入的題，能從對話還原就先補寫；還原不了就照常重出那一題。
+8. 使用者要求再考某題：`jl.py round add <item_key>`，會加在本輪最後。
 
 ## 題目裡看到不認識的東西
 「不會」有兩種，處理不同：
 - **答不出考點本身**：就是一般的答錯或跳過，照常回饋，**不另外記錄**。
-- **看不懂題目裡的某個詞或句型**（題幹、選項、店員台詞；不論最後答對答錯）：執行
-  `jl.py seen add --term "<詞>" --kind word|grammar|expression --attempt <id> [--where prompt|choice] [--reading ..] [--zh ..]`。
+- **看不懂題目裡的某個詞或句型**（題幹、選項、店員台詞；不論最後答對答錯）：寫進該題 `record` 的 `seen`
+  （事後才說就用 `jl.py seen add --term .. --kind .. --attempt <id>`）。
   - 這是發現缺漏，**不得說成題目的問題**，也不說成使用者的失敗；回饋時用一兩行說明那個詞，不展開成講義。
   - 只在使用者答錯相關、或主動問到時才說明；答對且沒問就只記錄、不講解（仍守「先測驗再講解」）。
   - 記錄後會出現在 `resume`／`variants`，由 generator 出成新 unit 來測。
 - **整題看不懂**、無法對考點作答（使用者自述）：
   - 先讓使用者照常嘗試或說不懂，然後**立即**給整句翻譯與一兩個關鍵點，當作一次讀懂的範例，不當成測驗。
-  - `answer`（或 `report`）加 `--miss unreadable`：這次不算考點的失誤，也不算進步。
-  - 用 `seen add` 記下最關鍵的 1–3 個未知元素（不必逐詞），再 `jl.py item park <key> --reason too_hard`，暫停這題。
+  - 該題記 `"miss": "unreadable"`：這次不算考點的失誤，也不算進步。
+  - 在 `seen` 記下最關鍵的 1–3 個未知元素（不必逐詞），再 `jl.py item park <key> --reason too_hard`，暫停這題。
   - 回饋時說「這題現在超出範圍，已記下要補的東西」，不逐詞上課。
   - 暫停的題目列在 `v_parked`；那些未知元素升格成 unit 並有進展後，由優化或備題流程 `item unpark`，放回來延後再測。
 
 ## 作答紀錄的維度
-- `outcome`：`correct`／`incorrect`／`skipped`。
+- `outcome`：`correct`／`incorrect`／`skipped`，由你判斷。
 - `confidence`（使用者自述才填）：`sure`／`unsure`（不確定）／`guess`（猜的）。
 - `basis`（使用者自述才填）：`known`（真的會）／`intuition`（語感直覺）／`context`（由前後文推測）／
-  `assisted`（被洩題或被提示，非自行想出）／`other`（細節寫 `--note`）。
+  `assisted`（被洩題或被提示，非自行想出）／`other`（細節寫 note）。
 - `miss`（答錯原因，使用者自述才填）：`slip`（粗心、漏看條件、手滑）／`probe`（卡在題目裡看不懂的部分，而非考點）／
   `unreadable`（整題看不懂）。不從答案推論，也不從作答時間推論。
-- 自述的時機 `phase`：與作答一起說＝`with_answer`；看完回饋後才說＝`after_feedback`（可信度不同，分開保存）。
-- 錯誤 `tags`（答錯時由你判斷，可多個，逗號分隔）：
+- 自述的時機：與作答一起說＝`with_answer`；看完回饋後才說＝`after_feedback`（可信度不同，分開保存）。
+- 自述只依使用者實際說的內容對應到上面的值；不要替使用者補上沒說的信心或依據。
+- `tags`（由你判斷，可多個）：
   `particle` 助詞｜`conjugation` 活用／變化｜`vocab` 用錯或不會的詞｜`kana_form` 假名字形／讀音混淆｜
   `long_vowel` 長音｜`sokuon` 促音｜`register` 語氣／禮貌程度不合情境｜`word_order` 語序｜
   `unnatural` 文法對但不自然｜`omission` 漏掉必要成分｜`meaning` 意思理解錯｜`other`。
+  答對的題也可以有 tag，代表考點以外的錯。
 - 排程如何看待（由 `jl.py` 計算，不要自行換算）：
   - 答錯、`skipped`：算失誤。
   - 答錯但 `miss` 為 `slip` 或 `probe`：**輕度失誤**，穩定度小降、不計 lapse，約一天內重測。
   - 答錯或跳過且 `miss=unreadable`：**無證據**，不加不扣（題目沒量到考點）。
-  - 答對但 `guess`，或依據為 `context`／`assisted`／`other`：**無證據**，不加穩定度、不算失誤，約一天內再測。
+  - 答對但 `guess`，或依據為 `context`／`assisted`／`other`：**無證據**。
   - 答對但 `unsure`：弱證據，穩定度只小幅增加，不計入「鞏固」所需的成功日。
+  - 同一學習日內該 unit 已經答錯過（看過正解），之後的答對只算弱證據。
   - 其餘答對：一般證據。
 - 「隔天」以凌晨 4:00 為日界（中間要經過睡眠）；鞏固需要跨多個學習日、間隔夠久仍能提取。
-- **不主動逐題追問信心或依據**；只收使用者自己說的。使用者的自述優先於自動判分所暗示的信心。
+- **不主動逐題追問信心或依據**；只收使用者自己說的。
 - **禁止使用作答速度、輸入時間、延遲當作熟練度或語感的指標**。不記錄也不推論作答時間。
 
 ## 混淆對（跨單元的對比型錯誤）
@@ -77,13 +93,14 @@
 - 使用者沒看懂題目裡的詞時，不把它說成「題目太難」「題目有問題」；那是找到的缺漏（見上方「題目裡看到不認識的東西」）。
 
 ## 回合結構
-- 一輪約 15–20 題（上限由 `meta.round_max` 控制，預設 20；`next` 輸出 `round: 已作答 N/20`）。
-- **一輪結束就停止出題**。結束的時機：題數到了、`next` 回報 `ROUND_LIMIT`、題庫沒有題（`NO_ITEMS`），或使用者要休息。
-  1. 做手動 checkpoint（見 compaction.md）；checkpoint 會關閉本輪。
+- 一輪的題數由 `round start` 決定（上限 `meta.round_max`，預設 20）：到期的 unit、未作答過的新題（至少 `new_item_ratio`）、
+  再補最易忘的。同一輪不會出現同一題；答錯的題下一輪起換同 unit 的另一題重測。
+- **一輪結束就停止出題**。結束的時機：`record` 回 `ROUND_COMPLETE`、`round start` 回 `NO_ITEMS`，或使用者要休息。
+  1. 做手動 checkpoint（見 compaction.md）；checkpoint 會關閉本輪，還沒寫入的題直接捨棄。
   2. 報告：答對率、錯最多的類型、下一輪建議；不要逐題重述。
-  3. **停下，等使用者明確說「繼續」「下一輪」之類**才再出題，再出題時用 `next --new-round`。
-     關閉後的 `next` 會回 `ROUND_CLOSED` 且不出題，不要自行加 `--new-round` 繞過。
+  3. **停下，等使用者明確說「繼續」「下一輪」之類**才再出題，這時用 `round start --new-round`。
+     關閉後的 `round start` 會回 `ROUND_CLOSED` 且不排題，不要自行加 `--new-round` 繞過。
      新對話裡使用者說「開始練習」就算明確指示。
-- **下一輪需要新題時先備題**：checkpoint 的 next_focus 要求新題或新情境變體時，開新一輪前先告訴使用者，
-  走 generator → reviewer → import（見 subagent-policy.md），匯入後再開始。不得用繼續抽舊題庫代替。
-  只是到期複習、不需要新題時，可直接開新一輪。
+- **備題**：`resume` 會顯示「未作答過的題」與上次 checkpoint 後是否已匯入新題。
+  未作答過的題夠一輪（≥ `round_max`），或 checkpoint 之後已經匯入過，就**不出新題**，直接開始。
+  不夠一輪、且 next_focus 需要的點在未作答的題裡沒有時，才先告訴使用者，走 generator → reviewer → import（見 subagent-policy.md）。

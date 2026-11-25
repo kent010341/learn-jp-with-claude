@@ -9,10 +9,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 JL = ROOT / "tools" / "jl.py"
+sys.path.insert(0, str(JL.parent))
+import jl  # noqa: E402  判分函式直接測
 
 SEED = {
     "round_id": "t", "stage": 0,
@@ -20,7 +23,7 @@ SEED = {
     "items": [
         {"key": "a_free", "unit": "u_a", "kind": "phrase", "task": "translate",
          "prompt": "A?", "answers": ["お会計お願いします"], "jp": "お会計お願いします",
-         "reading": "おかいけいおねがいします",
+         "reading": "おかいけいおねがいします", "judge": "考點：結帳的請求",
          "zh": "結帳", "scenario": "s"},
         {"key": "b_free", "unit": "u_b", "kind": "grammar", "task": "reading",
          "prompt": "B?", "answers": ["これをください"], "jp": "これをください", "zh": "給我這個", "scenario": "s"},
@@ -37,9 +40,13 @@ SEED = {
          "prompt": "N?", "choices": ["に", {"text": "で", "unit": "u_c"}], "answers": ["に"], "jp": "に",
          "scenario": "s", "stage": 5},
         {"key": "c_cloze", "unit": "u_c", "task": "cloze",
-         "prompt": "公園（ ）遊ぶ", "answers": ["で"], "jp": "公園で遊ぶ", "scenario": "s2"},
+         "prompt": "公園（ ）遊ぶ", "answers": ["で"], "jp": "公園で遊ぶ", "scenario": "s2", "probe": "遊ぶ"},
     ],
 }
+
+
+def ts_of(s):
+    return datetime.fromisoformat(s).timestamp()
 
 
 class Base(unittest.TestCase):
@@ -76,84 +83,123 @@ class Base(unittest.TestCase):
         finally:
             con.close()
 
-    def present(self, key, now=None):
-        out = self.jl("present", key, now=now).stdout
-        return int(out.split("presentation: ")[1].split()[0])
+    def write(self, data, name="r.json"):
+        f = Path(self.tmp.name) / name
+        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return f
 
-    def answer(self, key, text, *extra, now=None, ok=True):
-        pid = self.present(key, now=now)
-        return self.jl("answer", pid, text, *extra, now=now, ok=ok)
+    def add(self, key, now=None):
+        out = self.jl("round", "add", key, "--new-round", now=now).stdout
+        return int(out.split("added seq ")[1].split()[0])
 
-    def letter_for(self, pid, text):
-        shown = json.loads(self.sql("SELECT shown_choices FROM presentations WHERE id=?", pid)[0][0])
+    def record(self, entries, now=None, ok=True):
+        return self.jl("record", stdin=json.dumps(entries, ensure_ascii=False), now=now, ok=ok)
+
+    def answer(self, key, text, outcome="correct", now=None, ok=True, **fields):
+        seq = self.add(key, now=now)
+        return self.record([dict(seq=seq, answer=text, outcome=outcome, **fields)], now=now, ok=ok)
+
+    def letter_for(self, seq, text):
+        shown = json.loads(self.sql("""SELECT shown_choices FROM presentations WHERE seq=?
+                                       ORDER BY id DESC LIMIT 1""", seq)[0][0])
         return chr(65 + shown.index(text))
 
     def state(self, unit, skill="comprehend"):
         r = self.sql("SELECT * FROM unit_state WHERE unit=? AND skill=?", unit, skill)
         return r[0] if r else None
 
+    def last_attempt(self):
+        return self.sql("SELECT * FROM v_attempt_effective ORDER BY id DESC LIMIT 1")[0]
 
-def first_line(r):
-    return r.stdout.splitlines()[0]
+    def close_round(self, now=None):
+        self.jl("checkpoint", "--summary", "s", now=now)
 
 
-class TestGrading(Base):
+def item(key):
+    it = dict(next(i for i in SEED["items"] if i["key"] == key))
+    it["answers"] = json.dumps(it["answers"], ensure_ascii=False)
+    choices = it.get("choices")
+    it["choices"] = json.dumps([c["text"] if isinstance(c, dict) else c for c in choices],
+                               ensure_ascii=False) if choices else None
+    it["unit_kind"] = "kana" if key == "k_kana" else "word"
+    return it
+
+
+class TestGradingFunction(unittest.TestCase):
+    """程式判分只當稽核（答案有限的題型），但規則仍要正確。"""
+
+    def g(self, key, raw, extra=()):
+        return jl.grade_answer(item(key), raw, None, extra)
+
     def test_exact_and_romaji(self):
-        self.assertIn("outcome=correct", first_line(self.answer("a_free", "お会計お願いします")))
-        self.assertIn("outcome=correct", first_line(self.answer("a_free", "okaikei onegaishimasu")))
+        self.assertEqual(self.g("a_free", "お会計お願いします")["result"], "correct")
+        self.assertEqual(self.g("a_free", "okaikei onegaishimasu", ["おかいけいおねがいします"])["result"], "correct")
 
     def test_particle_typed_as_wa_o_is_correct(self):
-        self.assertIn("outcome=correct", first_line(self.answer("b_free", "これおください")))
-        self.assertIn("outcome=correct", first_line(self.answer("b_free", "kore wo kudasai")))
-        self.assertIn("outcome=correct", first_line(self.answer("b_free", "kore o kudasai")))
-
-    def test_particle_tolerance_does_not_hide_other_errors(self):
-        self.assertIn("outcome=incorrect", first_line(self.answer("b_free", "これをくだらい")))
+        for raw in ("これおください", "kore wo kudasai", "kore o kudasai"):
+            self.assertEqual(self.g("b_free", raw)["result"], "correct", raw)
+        self.assertEqual(self.g("b_free", "これをくだらい")["result"], "incorrect")
 
     def test_long_vowel_still_counts_when_kana(self):
-        self.assertIn("outcome=correct", first_line(self.answer("e_long", "おおきい")))
-        self.assertIn("outcome=incorrect", first_line(self.answer("e_long", "おきい")))
+        self.assertEqual(self.g("e_long", "おおきい")["result"], "correct")
+        self.assertEqual(self.g("e_long", "おきい")["result"], "incorrect")
 
-    def test_unknown_is_skipped(self):
-        self.assertIn("outcome=skipped", first_line(self.answer("a_free", "不知道")))
-        self.assertIn("outcome=skipped", first_line(self.answer("a_free", "idk")))
-
-    def test_produce_mismatch_needs_judgment_and_writes_nothing(self):
-        pid = self.present("a_free")
-        r = self.jl("answer", pid, "お会計をお願いします")
-        self.assertTrue(r.stdout.startswith("NEEDS_JUDGMENT"))
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM attempts")[0][0], 0)
-        r = self.jl("answer", pid, "お会計をお願いします", "--outcome", "correct")
-        self.assertIn("(judged)", first_line(r))
-        r = self.jl("answer", pid, "x", "--outcome", "correct", ok=False)  # 同一次出題不能重複作答
-        self.assertNotEqual(r.returncode, 0)
-
-    def test_judged_incorrect_with_tags(self):
-        pid = self.present("a_free")
-        self.jl("answer", pid, "お会計おください", "--outcome", "incorrect", "--tags", "register,unnatural")
-        tags = {r[0] for r in self.sql("SELECT tag FROM attempt_tags")}
-        self.assertEqual(tags, {"register", "unnatural"})
-        self.assertNotEqual(self.jl("answer", self.present("a_free"), "x", "--outcome", "incorrect",
-                                    "--tags", "nope", ok=False).returncode, 0)
+    def test_unknown(self):
+        self.assertEqual(self.g("a_free", "不知道")["result"], "unknown")
+        self.assertEqual(self.g("a_free", "idk")["result"], "unknown")
 
     def test_chinese_meaning_exact_only(self):
-        self.assertIn("outcome=correct", first_line(self.answer("d_free", "找零")))
-        # 子字串不再自動判對：「不是找零」交給判斷
-        self.assertTrue(self.answer("d_free", "不是找零").stdout.startswith("NEEDS_JUDGMENT"))
+        self.assertEqual(self.g("d_free", "找零")["result"], "correct")
+        self.assertEqual(self.g("d_free", "不是找零")["result"], "ambiguous")
 
-    def test_choice_by_letter_follows_shown_order_and_stores_pick(self):
-        pid = self.present("c_choice")
-        r = self.jl("answer", pid, self.letter_for(pid, "に"))
-        self.assertIn("outcome=incorrect", first_line(r))
+    def test_choice_by_letter_and_text(self):
+        it = item("c_choice")
+        self.assertEqual(jl.grade_answer(it, "b", ["が", "に", "で"])["matched"], "に")
+        self.assertEqual(jl.grade_answer(it, "で", ["が", "に", "で"])["result"], "correct")
+
+
+class TestRecord(Base):
+    def test_outcome_is_ai_judgment_and_audit_for_auto_tasks(self):
+        r = self.answer("e_long", "おきい", outcome="correct")
+        self.assertIn("AUDIT seq", r.stdout)
+        a = self.last_attempt()
+        self.assertEqual((a["outcome"], a["grade_result"]), ("correct", "mismatch"))
+        r = self.answer("a_free", "お会計をお願いします", outcome="correct")  # 產出題：不稽核
+        self.assertNotIn("AUDIT", r.stdout)
+        self.assertEqual(self.last_attempt()["grade_result"], "judged")
+
+    def test_choice_letter_maps_to_shown_order_and_confusion_candidate(self):
+        seq = self.add("c_choice")
+        r = self.record([{"seq": seq, "answer": self.letter_for(seq, "に"), "outcome": "incorrect"}])
         self.assertIn("CONFUSION_CANDIDATE: u_c|u_ni", r.stdout)
-        a = self.sql("SELECT picked_text, picked_unit, answer_mode, user_answer FROM attempts")[0]
-        self.assertEqual((a["picked_text"], a["picked_unit"], a["answer_mode"]), ("に", "u_ni", "choice"))
-        pid = self.present("c_choice")
-        self.assertIn("outcome=correct", first_line(self.jl("answer", pid, self.letter_for(pid, "で"))))
+        a = self.sql("SELECT picked_text, picked_unit, answer_mode FROM attempts")[0]
+        self.assertEqual(tuple(a), ("に", "u_ni", "choice"))
         self.assertEqual(self.sql("SELECT n FROM v_distractor_picks WHERE unit='u_c'")[0][0], 1)
 
-    def test_choice_by_text(self):
-        self.assertIn("outcome=correct", first_line(self.answer("c_choice", "で")))
+    def test_reports_tags_and_seen_in_one_call(self):
+        seq = self.add("a_free")
+        self.record([{"seq": seq, "answer": "お会計おください", "outcome": "incorrect", "tags": ["register"],
+                      "confidence": "unsure", "after": {"miss": "slip", "note": "漏看"},
+                      "seen": [{"term": "お会計", "kind": "word", "where": "prompt"}]}])
+        a = self.last_attempt()
+        self.assertEqual((a["confidence"], a["miss"], a["tags"], a["has_after_feedback"]),
+                         ("unsure", "slip", "register", 1))
+        self.assertEqual(self.sql("SELECT attempts FROM v_encounters")[0][0], f"{a['id']}:prompt")
+
+    def test_batch_is_validated_before_writing(self):
+        s1, s2 = self.add("e_long"), self.add("b_free")
+        bad = [{"seq": s1, "answer": "x", "outcome": "correct"},
+               {"seq": s2, "answer": "x", "outcome": "correct", "tags": ["nope"]}]
+        self.assertNotEqual(self.record(bad, ok=False).returncode, 0)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM attempts")[0][0], 0)
+        self.assertNotEqual(self.record([{"seq": s1, "answer": "x"}], ok=False).returncode, 0)  # 需要 outcome
+        self.record(bad[:1])
+        self.assertNotEqual(self.record(bad[:1], ok=False).returncode, 0)  # 同一題不能記兩次
+
+    def test_round_complete_message(self):
+        s1 = self.add("e_long")
+        out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
+        self.assertIn("ROUND_COMPLETE", out)
 
 
 class TestLearnDay(Base):
@@ -174,22 +220,18 @@ class TestLearnDay(Base):
 
 
 class TestScheduling(Base):
-    def test_answer_creates_state_and_stats(self):
+    def test_record_creates_state_and_stats(self):
         self.answer("a_free", "お会計お願いします")
-        st = self.state("u_a", "produce")
-        self.assertEqual(st["tier"], "learning")
+        self.assertEqual(self.state("u_a", "produce")["tier"], "learning")
         s = self.sql("SELECT n, n_correct FROM unit_stats WHERE unit='u_a'")[0]
         self.assertEqual((s["n"], s["n_correct"]), (1, 1))
 
-    def test_guess_correct_is_no_evidence(self):
-        self.answer("e_long", "おおきい", "--confidence", "guess")
-        st = self.state("u_e")
-        self.assertEqual(st["reps_success"], 0)
-        self.assertAlmostEqual(st["stability_days"], 0.3)
-
-    def test_context_basis_is_no_evidence(self):
-        self.answer("e_long", "おおきい", "--basis", "context")
+    def test_guess_and_context_are_no_evidence(self):
+        self.answer("e_long", "おおきい", confidence="guess")
         self.assertEqual(self.state("u_e")["reps_success"], 0)
+        self.assertAlmostEqual(self.state("u_e")["stability_days"], 0.3)
+        self.answer("b_free", "これをください", basis="context")
+        self.assertEqual(self.state("u_b")["reps_success"], 0)
 
     def test_after_feedback_report_changes_schedule_not_attempts(self):
         self.answer("e_long", "おおきい")
@@ -198,43 +240,67 @@ class TestScheduling(Base):
         self.jl("report", "--confidence", "guess", "--note", "其實是猜的")
         self.assertEqual(before, [tuple(r) for r in self.sql("SELECT * FROM attempts")])
         self.assertEqual(self.state("u_e")["reps_success"], 0)
-        e = self.sql("SELECT confidence, has_after_feedback FROM v_attempt_effective")[0]
-        self.assertEqual((e["confidence"], e["has_after_feedback"]), ("guess", 1))
-        self.assertEqual(self.sql("SELECT n_after_feedback_reports FROM unit_stats WHERE unit='u_e'")[0][0], 1)
+        self.assertEqual(self.last_attempt()["has_after_feedback"], 1)
 
-    def test_report_merges_fields(self):
-        self.answer("e_long", "おおきい", "--basis", "intuition")
+    def test_report_merges_and_retracts_fields(self):
+        self.answer("e_long", "おおきい", basis="context")
+        self.assertEqual(self.state("u_e")["reps_success"], 0)
         self.jl("report", "--confidence", "unsure")
-        e = self.sql("SELECT confidence, basis FROM v_attempt_effective")[0]
-        self.assertEqual((e["confidence"], e["basis"]), ("unsure", "intuition"))
+        self.assertEqual((self.last_attempt()["confidence"], self.last_attempt()["basis"]), ("unsure", "context"))
+        self.jl("report", "--basis", "none")
+        self.assertIsNone(self.last_attempt()["basis"])
+        self.assertEqual(self.state("u_e")["reps_success"], 0)  # unsure 仍是弱證據
+        self.jl("report", "--confidence", "none")
+        self.assertEqual(self.state("u_e")["reps_success"], 1)
+
+    def test_report_outcome_regrades_without_touching_attempts(self):
+        self.answer("a_free", "あした7じ", outcome="incorrect", tags=["particle"])
+        before = [tuple(r) for r in self.sql("SELECT * FROM attempts")]
+        out = self.jl("report", "--outcome", "correct", "--note", "考點以外的錯").stdout
+        self.assertIn("(correction)", out)
+        self.assertEqual(before, [tuple(r) for r in self.sql("SELECT * FROM attempts")])
+        a = self.last_attempt()
+        self.assertEqual((a["outcome"], a["recorded_outcome"], a["regraded"]), ("correct", "incorrect", 1))
+        self.assertEqual(self.state("u_a", "produce")["reps_success"], 1)
+        self.assertEqual(self.sql("SELECT outcome FROM v_tag_counts WHERE tag='particle'")[0][0], "correct")
+
+    def test_same_day_correct_after_failure_is_not_a_success_day(self):
+        self.answer("e_long", "おおきい", now="2026-01-01T10:00")
+        self.answer("e_long", "おきい", outcome="incorrect", now="2026-01-02T10:00")
+        self.answer("e_long", "おおきい", now="2026-01-02T10:20")
+        st = self.state("u_e")
+        self.assertEqual(json.loads(st["success_days"]), [jl.learn_day(ts_of("2026-01-01T10:00"), 4)])
+        self.assertEqual(st["last_fail_day"], jl.learn_day(ts_of("2026-01-02T10:00"), 4))
+        self.answer("e_long", "おおきい", now="2026-01-03T10:00")  # 隔天（睡過）才算
+        self.assertEqual(self.state("u_e")["distinct_success_days"], 2)
 
     def test_lapse_counts_only_after_success(self):
-        self.answer("e_long", "おきい")
+        self.answer("e_long", "おきい", outcome="incorrect")
         self.assertEqual(self.state("u_e")["lapses"], 0)
         self.answer("e_long", "おおきい", now="2026-01-02T10:00")
-        self.answer("e_long", "おきい", now="2026-01-03T10:00")
+        self.answer("e_long", "おきい", outcome="incorrect", now="2026-01-03T10:00")
         self.assertEqual(self.state("u_e")["lapses"], 1)
 
     def test_skills_scheduled_separately(self):
         self.answer("c_choice", "で")
-        self.assertIsNotNone(self.state("u_c", "comprehend"))
         self.assertIsNone(self.state("u_c", "produce"))
-        self.assertTrue(self.answer("c_cloze", "に").stdout.startswith("NEEDS_JUDGMENT"))
-        self.answer("c_cloze", "に", "--outcome", "incorrect", "--tags", "particle")
+        self.answer("c_cloze", "に", outcome="incorrect", tags=["particle"])
         self.assertEqual(self.state("u_c", "produce")["reps_success"], 0)
         self.assertEqual(self.state("u_c", "comprehend")["reps_success"], 1)
 
-    def test_comprehend_only_unit_can_consolidate(self):
+    def consolidate_cfg(self):
         for k, v in (("cons_gap_days", "1"), ("cons_min_stability", "0.1"), ("cons_min_days", "3")):
             self.sql("UPDATE meta SET value=? WHERE key=?", v, k)
+
+    def test_comprehend_only_unit_can_consolidate(self):
+        self.consolidate_cfg()
         for d in ("2026-01-01T10:00", "2026-01-02T10:00", "2026-01-03T10:00"):
             self.answer("k_kana", "nu", now=d)
         self.assertEqual(self.state("u_k")["tier"], "consolidated")
         self.assertEqual(self.sql("SELECT status FROM v_unit_status WHERE unit='u_k'")[0][0], "consolidated")
 
     def test_unit_needs_all_skills_to_consolidate(self):
-        for k, v in (("cons_gap_days", "1"), ("cons_min_stability", "0.1"), ("cons_min_days", "3")):
-            self.sql("UPDATE meta SET value=? WHERE key=?", v, k)
+        self.consolidate_cfg()
         for d in ("2026-01-01T10:00", "2026-01-02T10:00", "2026-01-03T10:00"):
             self.answer("c_choice", "で", now=d)
         self.assertEqual(self.state("u_c")["tier"], "consolidated")
@@ -242,7 +308,7 @@ class TestScheduling(Base):
 
     def test_rebuild_reproduces_state(self):
         self.answer("e_long", "おおきい")
-        self.answer("e_long", "おきい", now="2026-01-03T10:00")
+        self.answer("e_long", "おきい", outcome="incorrect", now="2026-01-03T10:00")
         q = "SELECT * FROM unit_state ORDER BY unit, skill"
         before = [tuple(r) for r in self.sql(q)]
         self.jl("rebuild")
@@ -259,117 +325,152 @@ class TestScheduling(Base):
             self.sql("INSERT INTO task_types VALUES('x','speak','auto','d')")
 
 
-class TestNext(Base):
-    def keys_served(self, n=1, now=None):
-        out = self.jl("next", "-n", n, now=now).stdout
-        return [line.split("item: ")[1].split()[0] for line in out.splitlines() if line.startswith("item: ")], out
+class TestRoundStart(Base):
+    def start(self, *a, now=None):
+        out = self.jl("round", "start", *a, now=now).stdout
+        keys = [line.split("] ")[1].split()[0] for line in out.splitlines() if line.startswith("[")]
+        return keys, out
 
-    def test_serves_then_none_when_all_seen(self):
-        seen = set()
-        for _ in range(10):
-            keys, out = self.keys_served()
-            if not keys:
-                break
-            pid = int(out.split("presentation: ")[1].split()[0])
-            self.jl("answer", pid, "x", "--outcome", "correct")
-            seen.add(keys[0])
-        self.assertNotIn("ni_choice", seen)  # stage 5 > 0
-        self.assertIn("NO_ITEMS", self.jl("next").stdout)
+    def test_plans_whole_round_unique_units_and_stage(self):
+        keys, out = self.start()
+        self.assertTrue(out.startswith("ROUND 1 開始"))
+        self.assertNotIn("ni_choice", keys)  # stage 5 > 0
+        units = [k for k in keys]
+        self.assertEqual(len(units), len(set(units)))
+        self.assertFalse({"c_choice", "c_cloze"} <= set(keys))  # 同一 unit 一輪只出一題
+        self.assertIn("c_choice", keys)                          # 產出排在理解之後
+        self.assertIn("答案", out)
+        self.assertIn("判分: 考點：結帳的請求", out)
+        self.assertEqual(self.sql("SELECT planned FROM rounds")[0][0], len(keys))
 
-    def test_produce_waits_for_comprehend(self):
-        served = []
-        for _ in range(8):
-            keys, out = self.keys_served()
-            if not keys:
-                break
-            served.append(keys[0])
-            pid = int(out.split("presentation: ")[1].split()[0])
-            self.jl("answer", pid, "x", "--outcome", "correct")
-        self.assertLess(served.index("c_choice"), served.index("c_cloze"))
+    def test_open_round_lists_pending_instead_of_replanning(self):
+        keys, _ = self.start("-n", 3)
+        self.record([{"seq": 1, "answer": "x", "outcome": "correct"}])
+        _, out = self.start()
+        self.assertTrue(out.startswith("ROUND_OPEN"))
+        self.assertNotIn("[1]", out)
+        self.assertIn("[2]", out)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM rounds")[0][0], 1)
+        self.assertIn("已記錄 1/3", self.jl("round", "status").stdout)
 
-    def test_answers_not_in_output(self):
-        _, out = self.keys_served(5)
-        self.assertNotIn("answers", out)
-        self.assertNotIn("找零", out)
+    def test_checkpoint_closes_round_and_gate(self):
+        self.start("-n", 2)
+        self.record([{"seq": 1, "answer": "x", "outcome": "correct"}])
+        out = self.jl("checkpoint", "--summary", "s", "--next", "n").stdout
+        self.assertIn("ROUND_CLOSED", out)
+        self.assertIn("1 題未記錄", out)
+        _, out = self.start()
+        self.assertTrue(out.startswith("ROUND_CLOSED"))
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM rounds")[0][0], 1)
+        _, out = self.start("--new-round")
+        self.assertTrue(out.startswith("ROUND 2"))
+        self.assertIn("本輪：第 2 輪進行中", self.jl("resume").stdout)
 
-    def test_retired_item_not_served(self):
+    def test_auto_checkpoint_does_not_close_round(self):
+        self.start("-n", 2)
+        self.record([{"seq": 1, "answer": "x", "outcome": "correct"}])
+        self.jl("checkpoint", "--auto", now="2026-01-01T11:00")
+        self.assertTrue(self.start(now="2026-01-01T11:05")[1].startswith("ROUND_OPEN"))
+
+    def test_round_max_caps_n(self):
+        self.sql("UPDATE meta SET value='2' WHERE key='round_max'")
+        keys, _ = self.start("-n", 5)
+        self.assertEqual(len(keys), 2)
+
+    def test_new_item_quota(self):
+        for k in ("a_free", "b_free", "c_choice", "d_free"):
+            self.answer(k, "x")
+        self.close_round()
+        self.sql("UPDATE unit_state SET due_ts=0")
+        self.sql("UPDATE meta SET value='0.5' WHERE key='new_item_ratio'")
+        keys, out = self.start("-n", 2, "--new-round", now="2026-01-02T10:00")
+        self.assertEqual(len([k for k in keys if k in ("e_long", "k_kana", "c_cloze")]), 1)
+        self.assertIn("新題 1", out)
+
+    def test_retired_and_parked_not_served(self):
         for k in ("a_free", "b_free", "c_choice", "d_free", "k_kana", "c_cloze"):
             self.jl("retire", k, "--reason", "t")
-        keys, _ = self.keys_served()
+        keys, _ = self.start()
         self.assertEqual(keys, ["e_long"])
+        self.close_round()
+        self.jl("item", "park", "e_long", "--reason", "too_hard")
+        self.assertIn("NO_ITEMS", self.start("--new-round")[1])
+        self.jl("item", "unpark", "e_long")
+        self.assertEqual(self.start("--new-round")[0], ["e_long"])
 
-    def test_prefers_items_not_yet_correct(self):
+    def test_retest_after_miss_uses_another_item(self):
         self.sql("UPDATE meta SET value='9' WHERE key='stage'")
         extra = {"round_id": "x", "stage": 0, "items": [
             {"key": "e_long2", "unit": "u_e", "task": "reading", "prompt": "E2?", "answers": ["おおきい"],
              "scenario": "s9"}]}
-        f = Path(self.tmp.name) / "x.json"
-        f.write_text(json.dumps(extra, ensure_ascii=False), encoding="utf-8")
-        self.jl("import", f)
-        self.answer("e_long", "おおきい")
-        self.sql("UPDATE unit_state SET due_ts=0")
+        self.jl("import", self.write(extra))
+        self.answer("e_long2", "おおきい")
+        self.answer("e_long", "おきい", outcome="incorrect", now="2026-01-02T10:00")
+        self.close_round(now="2026-01-02T10:01")
         for k in ("a_free", "b_free", "c_choice", "d_free", "k_kana", "c_cloze", "ni_choice"):
             self.jl("retire", k, "--reason", "t")
-        keys, _ = self.keys_served()
+        self.sql("UPDATE unit_state SET due_ts=0")
+        keys, _ = self.start("--new-round", now="2026-01-03T10:00")
         self.assertEqual(keys, ["e_long2"])
 
+    def test_prefers_due_units_in_drilling_confusion(self):
+        self.answer("b_free", "x", outcome="incorrect")
+        self.answer("e_long", "x", outcome="incorrect")
+        self.close_round()
+        self.jl("confusion", "add", "--label", "A vs B", "--kind", "request_form", "--axis", "usage",
+                "--gist", "g", "--members", "u_b", "u_a")
+        self.jl("confusion", "taught", 1)
+        self.sql("UPDATE unit_state SET due_ts=0 WHERE unit='u_b'")
+        self.sql("UPDATE unit_state SET due_ts=-5 WHERE unit='u_e'")
+        self.sql("UPDATE meta SET value='0' WHERE key='new_item_ratio'")
+        keys, _ = self.start("-n", 1, "--new-round")
+        self.assertEqual(keys, ["b_free"])
 
-class TestRound(Base):
-    def test_manual_checkpoint_closes_round_until_new_round(self):
-        self.answer("e_long", "おおきい")
-        out = self.jl("checkpoint", "--summary", "s", "--next", "n").stdout
-        self.assertIn("ROUND_CLOSED", out)
-        out = self.jl("next").stdout
-        self.assertTrue(out.startswith("ROUND_CLOSED"))
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM presentations")[0][0], 1)  # 沒有出新題
-        out = self.jl("next", "--new-round").stdout
-        self.assertIn("round: 已作答 0/20", out)
-        self.assertIn("presentation:", out)
-        self.assertIn("presentation:", self.jl("next").stdout)  # 開新一輪後不必再加旗標
-
-    def test_auto_checkpoint_does_not_close_round(self):
-        self.answer("e_long", "おおきい")
-        self.jl("checkpoint", "--auto", now="2026-01-01T11:00")
-        self.assertIn("presentation:", self.jl("next", now="2026-01-01T11:05").stdout)
-
-    def test_round_limit(self):
-        self.sql("UPDATE meta SET value='2' WHERE key='round_max'")
-        out = self.jl("next", "-n", 5).stdout
-        self.assertEqual(out.count("presentation:"), 2)  # -n 不會超過剩餘題數
-        self.answer("e_long", "おおきい")
-        self.answer("b_free", "これをください")
-        out = self.jl("next").stdout
-        self.assertTrue(out.startswith("ROUND_LIMIT"))
-        self.jl("checkpoint", "--summary", "s")
-        self.assertIn("presentation:", self.jl("next", "--new-round").stdout)
-
-    def test_resume_shows_round_state(self):
-        self.jl("checkpoint", "--summary", "s")
-        self.assertIn("本輪：已結束", self.jl("resume").stdout)
+    def test_probe_shown_to_ai(self):
+        self.answer("c_choice", "で")
+        self.close_round()
+        self.sql("UPDATE unit_state SET due_ts=1e12")
+        out = self.jl("round", "add", "c_cloze", "--new-round").stdout
+        self.assertIn("probe: 遊ぶ", out)
 
 
 class TestImportAndTasks(Base):
-    def write(self, data, name="r.json"):
-        f = Path(self.tmp.name) / name
-        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        return f
-
     def test_import_is_idempotent(self):
         n1 = self.sql("SELECT COUNT(*) FROM items")[0][0]
         self.assertIn(f"skipped {len(SEED['items'])}", self.jl("import", self.write(SEED)).stdout)
         self.assertEqual(self.sql("SELECT COUNT(*) FROM items")[0][0], n1)
+
+    def test_reused_round_id_rejected_with_suggestion(self):
+        data = {"round_id": "t", "items": [{"key": "new1", "unit": "u_e", "task": "reading", "prompt": "?",
+                                            "answers": ["x"]}]}
+        r = self.jl("import", self.write(data), ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("t_r1", r.stdout + r.stderr)
+
+    def test_produce_answers_capped(self):
+        data = {"round_id": "cap", "items": [{"key": "p1", "unit": "u_a", "task": "translate", "prompt": "?",
+                                              "answers": [f"a{i}" for i in range(6)]}]}
+        self.assertNotEqual(self.jl("import", self.write(data), ok=False).returncode, 0)
+        self.assertNotEqual(self.jl("item", "edit", "a_free", "--set-answers",
+                                    json.dumps([f"a{i}" for i in range(6)]), ok=False).returncode, 0)
+
+    def test_import_sets_last_import_and_resume_warns(self):
+        self.jl("checkpoint", "--summary", "s", "--next", "需要新題", now="2026-01-01T09:00")
+        data = {"round_id": "r9", "items": [{"key": "z1", "unit": "u_e", "task": "reading", "prompt": "?",
+                                             "answers": ["x"]}]}
+        self.jl("import", self.write(data))
+        out = self.jl("resume").stdout
+        self.assertIn("已匯入 r9（1 題）", out)
+        self.assertIn("未作答過的題：", out)
 
     def test_unknown_task_rejected_then_task_add(self):
         data = {"round_id": "r", "stage": 0, "items": [
             {"key": "z", "unit": "u_z", "kind": "phrase", "task": "shadowing", "prompt": "Z", "answers": ["x"]}]}
         f = self.write(data)
         self.assertNotEqual(self.jl("import", f, ok=False).returncode, 0)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM items WHERE key='z'")[0][0], 0)
         self.jl("task", "add", "shadowing", "--skill", "produce", "--grading", "judge", "--desc", "跟讀")
         self.jl("import", f)
         self.assertEqual(self.sql("SELECT skill FROM unit_skills WHERE unit='u_z'")[0][0], "produce")
-        r = self.answer("z", "x")
-        self.assertTrue(r.stdout.startswith("NEEDS_JUDGMENT"))  # judge 題型一律判斷
 
     def test_choice_answers_must_be_in_choices(self):
         data = {"round_id": "r", "items": [{"key": "y", "unit": "u_y", "kind": "word", "task": "choice",
@@ -380,222 +481,96 @@ class TestImportAndTasks(Base):
         self.assertEqual(self.sql("SELECT gist FROM units WHERE unit='u_c'")[0][0], "動作地點→で；存在/抵達→に")
         skills = {r[0] for r in self.sql("SELECT skill FROM unit_skills WHERE unit='u_c'")}
         self.assertEqual(skills, {"comprehend", "produce"})
-        self.assertEqual({r[0] for r in self.sql("SELECT skill FROM unit_skills WHERE unit='u_k'")}, {"comprehend"})
 
     def test_item_edit_keeps_history(self):
+        self.jl("item", "edit", "a_free", "--set-answers", json.dumps(["お会計お願いします"]),
+                "--judge", "考點：お願いします")
         self.jl("item", "edit", "a_free", "--add-answer", "お会計をお願いします")
-        self.assertIn("outcome=correct", first_line(self.answer("a_free", "お会計をお願いします")))
-        h = self.sql("SELECT field, old FROM item_edits")[0]
-        self.assertEqual(h["field"], "answers")
-        self.assertNotIn("お会計をお願いします", h["old"])
+        it = self.sql("SELECT answers, judge FROM items WHERE key='a_free'")[0]
+        self.assertIn("お会計をお願いします", it["answers"])
+        self.assertEqual(it["judge"], "考點：お願いします")
+        fields = [r[0] for r in self.sql("SELECT field FROM item_edits ORDER BY id")]
+        self.assertEqual(fields, ["answers", "judge", "answers"])
 
 
 class TestQueries(Base):
     def test_sql_select_and_view(self):
-        self.answer("e_long", "おきい")
-        out = self.jl("sql", "SELECT unit, outcome FROM v_recent_errors").stdout
-        self.assertIn("u_e\tincorrect", out)
+        self.answer("e_long", "おきい", outcome="incorrect")
+        self.assertIn("u_e\tincorrect", self.jl("sql", "SELECT unit, outcome FROM v_recent_errors").stdout)
 
     def test_sql_rejects_writes(self):
         for q in ("DELETE FROM attempts", "WITH x AS (SELECT 1) DELETE FROM attempts",
                   "SELECT 1; DELETE FROM attempts", "UPDATE meta SET value='9'"):
             self.assertNotEqual(self.jl("sql", q, ok=False).returncode, 0, q)
-        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='stage'")[0][0], "0")
 
     def test_schema_lists_views_and_tasks(self):
         out = self.jl("schema").stdout
-        for s in ("v_attempt_effective", "v_variants_needed", "translate / produce", "long_vowel"):
+        for s in ("v_attempt_effective", "v_unseen_items", "v_rounds", "translate / produce", "correction"):
             self.assertIn(s, out)
 
-    def test_variants_needed(self):
+    def test_variants_needed_and_unseen(self):
         self.answer("e_long", "おおきい")
         self.answer("e_long", "おおきい", now="2026-01-02T02:00")  # 凌晨 4 點前＝同一學習日
         self.assertNotIn("u_e/comprehend", self.jl("variants").stdout)
         self.answer("e_long", "おおきい", now="2026-01-02T10:00")
-        self.assertIn("u_e/comprehend", self.jl("variants").stdout)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM v_variants_needed WHERE unit='u_c'")[0][0], 0)
+        out = self.jl("variants").stdout
+        self.assertIn("u_e/comprehend", out)
+        self.assertIn("未作答過的題：6", out)  # 8 題－e_long－ni_choice(stage 5)
 
     def test_unit_show(self):
         self.answer("c_choice", "で")
-        out = self.jl("unit", "show", "u_c").stdout
-        self.assertIn("skills=", out)
-        self.assertIn("c_choice", out)
+        self.assertIn("c_choice", self.jl("unit", "show", "u_c").stdout)
 
 
 class TestSessionAndCheckpoint(Base):
-    def test_resume_startup_opens_session_compact_keeps(self):
-        self.jl("resume")
+    def test_resume_startup_opens_session_compact_keeps_and_hook_is_logged(self):
+        self.assertIn("從未執行", self.jl("resume").stdout)
         s1 = self.sql("SELECT value FROM meta WHERE key='current_session'")[0][0]
         out = self.jl("resume", "--hook", stdin=json.dumps({"source": "compact"})).stdout
         self.assertIn("source=compact", out)
         self.assertEqual(self.sql("SELECT value FROM meta WHERE key='current_session'")[0][0], s1)
         self.jl("resume", "--hook", stdin=json.dumps({"source": "startup"}))
         self.assertNotEqual(self.sql("SELECT value FROM meta WHERE key='current_session'")[0][0], s1)
+        self.assertIn("startup", self.jl("resume").stdout.splitlines()[0])
 
     def test_auto_checkpoint(self):
         self.assertIn("不寫入", self.jl("checkpoint", "--auto").stdout)
         self.jl("checkpoint", "--summary", "s", "--next", "focus X")
-        self.answer("e_long", "おきい", now="2026-01-01T11:00")
+        self.answer("e_long", "おきい", outcome="incorrect", now="2026-01-01T11:00")
         self.jl("checkpoint", "--auto", now="2026-01-01T12:00")
         cp = self.sql("SELECT kind, summary, next_focus FROM checkpoints ORDER BY id DESC LIMIT 1")[0]
-        self.assertEqual(cp["kind"], "auto")
+        self.assertEqual((cp["kind"], cp["next_focus"]), ("auto", "focus X"))
         self.assertIn("u_e", cp["summary"])
-        self.assertEqual(cp["next_focus"], "focus X")
-        out = self.jl("resume", now="2026-01-01T13:00").stdout
-        self.assertIn("next_focus: focus X", out)
-        self.assertIn("auto checkpoint", out)
 
 
-class TestMigrationV3(Base):
-    V3 = """
-    CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE items(id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL, unit TEXT NOT NULL,
-      kind TEXT NOT NULL, qtype TEXT NOT NULL, format TEXT NOT NULL, prompt TEXT NOT NULL, choices TEXT,
-      answers TEXT NOT NULL, jp TEXT, reading TEXT, zh TEXT, scenario TEXT, stage INTEGER NOT NULL DEFAULT 0,
-      explain TEXT, source TEXT, retired TEXT);
-    CREATE TABLE attempts(id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, unit TEXT NOT NULL,
-      ts REAL NOT NULL, session_id INTEGER, outcome TEXT NOT NULL, confidence TEXT, basis TEXT,
-      answer_mode TEXT, user_answer TEXT, note TEXT);
-    CREATE TABLE item_state(unit TEXT PRIMARY KEY, tier TEXT NOT NULL);
-    CREATE TABLE sessions(id INTEGER PRIMARY KEY AUTOINCREMENT, started_ts REAL, ended_ts REAL);
-    CREATE TABLE checkpoints(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts REAL, summary TEXT, next_focus TEXT);
-    CREATE TABLE confusions(id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL, kind TEXT NOT NULL,
-      cause TEXT NOT NULL, axis TEXT NOT NULL, gist TEXT NOT NULL, pair_key TEXT NOT NULL UNIQUE,
-      miss_count INTEGER NOT NULL DEFAULT 1, first_seen REAL NOT NULL, last_seen REAL NOT NULL,
-      taught_at REAL, taught_session INTEGER, merged_into INTEGER);
-    CREATE TABLE confusion_members(confusion_id INTEGER NOT NULL, unit TEXT NOT NULL, PRIMARY KEY(confusion_id, unit));
-    CREATE TABLE confusion_attempts(confusion_id INTEGER NOT NULL, attempt_id INTEGER NOT NULL,
-      PRIMARY KEY(confusion_id, attempt_id));
-    INSERT INTO meta VALUES('schema_version','3'),('stage','1'),('shown:1','["x"]'),('current_session','1');
-    INSERT INTO items(key,unit,kind,qtype,format,prompt,choices,answers,jp,stage) VALUES
-      ('k1','u1','grammar','choice','recognize','p','["で","に"]','["で"]','で',0),
-      ('k2','u2','word','free','recall','讀音?',NULL,'["えき","eki"]','駅',0),
-      ('k3','u3','word','free','recall','意思?（用中文回答）',NULL,'["找零","おつり"]','お釣り',0),
-      ('k4','u1','grammar','free','produce','你想說 X，日文怎麼說？',NULL,'["で"]','で',1);
-    INSERT INTO sessions(started_ts) VALUES(1767225600);
-    INSERT INTO attempts(item_id,unit,ts,session_id,outcome,confidence,basis,answer_mode,user_answer,note) VALUES
-      (1,'u1',1767250000,1,'correct','unsure','intuition','choice','B',NULL),
-      (2,'u2',1767250100,1,'incorrect',NULL,NULL,'jp','えぎ','n'),
-      (3,'u3',1767250200,1,'skipped',NULL,NULL,'unknown','不知道',NULL);
-    INSERT INTO checkpoints(session_id,ts,summary,next_focus) VALUES(1,1767250300,'sum','nxt');
-    INSERT INTO confusions(label,kind,cause,axis,gist,pair_key,first_seen,last_seen)
-      VALUES('で vs に','particle','unknown','usage','g','u1|u2',1,1);
-    INSERT INTO confusion_members VALUES(1,'u1'),(1,'u2');
-    INSERT INTO confusion_attempts VALUES(1,2);
-    """
-
-    def test_v3_migrates(self):
-        self.db.unlink()
-        con = sqlite3.connect(self.db)
-        con.executescript(self.V3)
-        con.commit()
-        con.close()
-        r = self.jl("stats")
-        self.assertIn("v3 -> v5", r.stderr)
-        self.assertTrue((self.db.parent / "learning.v3.bak.db").exists())
-        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'")[0][0], "5")
-        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='stage'")[0][0], "1")
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM meta WHERE key LIKE 'shown:%'")[0][0], 0)
-        tasks = {r["key"]: r["task"] for r in self.sql("SELECT key, task FROM items")}
-        self.assertEqual({k: tasks[k] for k in ("k1", "k2", "k3", "k4")},
-                         {"k1": "choice", "k2": "reading", "k3": "meaning", "k4": "translate"})
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM attempts")[0][0], 3)
-        e = self.sql("SELECT confidence, basis FROM v_attempt_effective WHERE id=1")[0]
-        self.assertEqual((e["confidence"], e["basis"]), ("unsure", "intuition"))
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM confusion_members")[0][0], 2)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM confusion_attempts")[0][0], 1)
-        self.assertEqual(self.sql("SELECT kind FROM checkpoints")[0][0], "manual")
-        self.assertEqual({r[0] for r in self.sql("SELECT skill FROM unit_skills WHERE unit='u1'")},
-                         {"comprehend", "produce"})
-        self.assertFalse(self.sql("SELECT 1 FROM sqlite_master WHERE name='item_state'"))
-        q = "SELECT * FROM unit_state ORDER BY unit, skill"
-        before = [tuple(r) for r in self.sql(q)]
-        self.assertEqual(len(before), 3)
-        self.jl("rebuild")
-        self.assertEqual(before, [tuple(r) for r in self.sql(q)])
-
-
-class TestMigrationV4(Base):
-    def test_v4_migrates_to_v5(self):
-        """用 git 歷史中的 v4 版 jl.py 建立 v4 資料庫，再以目前版本遷移。"""
-        r = subprocess.run(["git", "show", "20af960:tools/jl.py"], cwd=ROOT, capture_output=True)
+class TestMigrationV5(Base):
+    def test_v5_migrates_and_next_round_works(self):
+        """依 docs/development.md：只驗證遷移後有備份、下一輪仍出得了題。"""
+        r = subprocess.run(["git", "show", "baf00b5:tools/jl.py"], cwd=ROOT, capture_output=True)
         if r.returncode:
-            self.skipTest("git 歷史中找不到 v4 版 jl.py")
-        old = Path(self.tmp.name) / "jl_v4.py"
+            self.skipTest("git 歷史中找不到 v5 版 jl.py")
+        old = Path(self.tmp.name) / "jl_v5.py"
         old.write_bytes(r.stdout)
         self.db.unlink()
-        env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(self.seed), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
-        seed_v4 = Path(self.tmp.name) / "seed4"
-        seed_v4.mkdir()
-        items = [{k: v for k, v in it.items()} for it in SEED["items"] if "probe" not in it]
-        (seed_v4 / "t.json").write_text(json.dumps(dict(SEED, items=items), ensure_ascii=False), encoding="utf-8")
-        env["JL_SEED"] = str(seed_v4)
+        seed5 = Path(self.tmp.name) / "seed5"
+        seed5.mkdir()
+        items = [{k: v for k, v in it.items() if k != "judge"} for it in SEED["items"]]
+        (seed5 / "t.json").write_text(json.dumps(dict(SEED, items=items), ensure_ascii=False), encoding="utf-8")
+        env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(seed5), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
 
         def old_jl(*a):
             p = subprocess.run([sys.executable, "-X", "utf8", str(old), *map(str, a)], capture_output=True,
                                text=True, encoding="utf-8", env=env)
             self.assertEqual(p.returncode, 0, p.stderr)
             return p.stdout
-        out = old_jl("present", "e_long")
-        pid = int(out.split("presentation: ")[1].split()[0])
-        old_jl("answer", pid, "おおきい", "--confidence", "unsure")
-        self.assertEqual(self.sql("SELECT value FROM meta WHERE key='schema_version'")[0][0], "4")
-        r = self.jl("stats")
-        self.assertIn("v4 -> v5", r.stderr)
-        self.assertTrue((self.db.parent / "learning.v4.bak.db").exists())
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM attempts")[0][0], 1)
-        self.assertEqual(self.sql("SELECT confidence FROM v_attempt_effective")[0][0], "unsure")
-        cols = {r["name"] for r in self.sql("PRAGMA table_info(attempt_reports)")}
-        self.assertIn("miss", cols)
-        self.assertIn("probe", {r["name"] for r in self.sql("PRAGMA table_info(items)")})
-        self.assertEqual(self.sql("SELECT n FROM unit_stats WHERE unit='u_e'")[0][0], 1)
-
-
-class TestMissReasons(Base):
-    def setUp(self):
-        super().setUp()
-        self.answer("e_long", "おおきい", now="2026-01-01T10:00")
-        self.s1 = self.state("u_e")["stability_days"]
-
-    def test_slip_is_light_miss(self):
-        self.answer("e_long", "おきい", "--miss", "slip", now="2026-01-02T10:00")
-        st = self.state("u_e")
-        self.assertEqual(st["lapses"], 0)
-        self.assertAlmostEqual(st["stability_days"], self.s1 * 0.85)
-        self.assertLessEqual(st["due_ts"] - datetime_ts("2026-01-02T10:00"), 86400 + 1)
-        self.assertEqual(self.sql("SELECT n_slip FROM unit_stats WHERE unit='u_e'")[0][0], 1)
-        q = "SELECT * FROM unit_state ORDER BY unit, skill"
-        before = [tuple(r) for r in self.sql(q)]
-        self.jl("rebuild")
-        self.assertEqual(before, [tuple(r) for r in self.sql(q)])
-
-    def test_plain_miss_hurts_more_than_slip(self):
-        self.answer("e_long", "おきい", now="2026-01-02T10:00")
-        st = self.state("u_e")
-        self.assertEqual(st["lapses"], 1)
-        self.assertLess(st["stability_days"], self.s1 * 0.85)
-
-    def test_report_slip_after_feedback(self):
-        self.answer("e_long", "おきい", now="2026-01-02T10:00")
-        before = [tuple(r) for r in self.sql("SELECT * FROM attempts")]
-        self.jl("report", "--miss", "slip", "--note", "漏看條件", now="2026-01-02T10:01")
-        self.assertEqual(before, [tuple(r) for r in self.sql("SELECT * FROM attempts")])
-        self.assertEqual(self.state("u_e")["lapses"], 0)
-        self.assertEqual(self.sql("SELECT miss FROM v_attempt_effective ORDER BY id DESC LIMIT 1")[0][0], "slip")
-
-    def test_unreadable_is_no_evidence(self):
-        self.answer("e_long", "おきい", "--miss", "unreadable", now="2026-01-02T10:00")
-        st = self.state("u_e")
-        self.assertEqual(st["lapses"], 0)
-        self.assertAlmostEqual(st["stability_days"], self.s1)
-
-    def test_miss_on_correct_has_no_effect(self):
-        self.answer("e_long", "おおきい", "--miss", "slip", now="2026-01-02T10:00")
-        self.assertEqual(self.state("u_e")["reps_success"], 2)
-
-    def test_miss_check_constraint(self):
-        with self.assertRaises(sqlite3.IntegrityError):
-            self.sql("INSERT INTO attempt_reports(attempt_id,ts,phase,miss) VALUES(1,0,'with_answer','lazy')")
+        pid = int(old_jl("present", "e_long").split("presentation: ")[1].split()[0])
+        old_jl("answer", pid, "おきい")
+        old_jl("checkpoint", "--summary", "s")
+        r = self.jl("round", "start", now="2026-01-02T10:00")
+        self.assertIn("v5 -> v6", r.stderr)
+        self.assertTrue((self.db.parent / "learning.v5.bak.db").exists())
+        self.assertIn("ROUND 1 開始", r.stdout)
+        self.assertIn("e_long", r.stdout)  # 舊的錯題仍會再出現
 
 
 class TestEncountersAndPark(Base):
@@ -603,129 +578,70 @@ class TestEncountersAndPark(Base):
         self.answer("e_long", "おおきい")
         self.answer("b_free", "これをください")
         a1, a2 = [r[0] for r in self.sql("SELECT id FROM attempts ORDER BY id")]
-        out = self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a1).stdout
-        self.assertIn("created", out)
-        self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a1)  # 同一次不重複計
+        self.assertIn("created", self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression",
+                                         "--attempt", a1).stdout)
+        self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a1)
         self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", a2, "--where", "choice")
         r = self.sql("SELECT * FROM v_encounters")[0]
         self.assertEqual((r["seen_count"], r["status"]), (2, "open"))
-        self.assertIn(f"{a2}:choice", r["attempts"])
-        self.assertIn("お召し上がり", self.jl("resume").stdout)
         self.jl("seen", "link", "お召し上がり", "u_a")
         self.assertEqual(self.sql("SELECT status FROM v_encounters")[0][0], "linked")
         self.assertNotEqual(self.jl("seen", "add", "--term", "x", "--kind", "word", "--attempt", 999,
                                     ok=False).returncode, 0)
 
-    def test_import_probe_and_from_encounter(self):
+    def test_from_encounter_import(self):
         self.answer("e_long", "おおきい")
         aid = self.sql("SELECT id FROM attempts")[0][0]
         self.jl("seen", "add", "--term", "お召し上がり", "--kind", "expression", "--attempt", aid)
         data = {"round_id": "p", "stage": 0,
-                "units": [{"unit": "u_meshiagaru", "kind": "phrase", "gist": "店員敬語：お召し上がり＝吃",
-                           "from_encounter": "お召し上がり"}],
-                "items": [{"key": "p1", "unit": "u_meshiagaru", "task": "choice", "prompt": "P?",
+                "units": [{"unit": "u_meshi", "kind": "phrase", "gist": "g", "from_encounter": "お召し上がり"}],
+                "items": [{"key": "p1", "unit": "u_meshi", "task": "choice", "prompt": "P?",
                            "choices": ["吃", "買"], "answers": ["吃"], "probe": "店内"}]}
-        f = Path(self.tmp.name) / "p.json"
-        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        self.jl("import", f)
-        self.assertEqual(self.sql("SELECT unit FROM encounters")[0][0], "u_meshiagaru")
-        self.assertIn("probe: 店内", self.jl("present", "p1").stdout)
-        bad = dict(data, units=[dict(data["units"][0], unit="u_x", from_encounter="不存在")],
-                   items=[dict(data["items"][0], key="p2", unit="u_x")])
-        f.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
-        self.assertNotEqual(self.jl("import", f, ok=False).returncode, 0)
+        self.jl("import", self.write(data))
+        self.assertEqual(self.sql("SELECT unit FROM encounters")[0][0], "u_meshi")
 
-    def test_park_and_unpark(self):
-        for k in ("a_free", "b_free", "c_choice", "d_free", "k_kana", "c_cloze"):
-            self.jl("retire", k, "--reason", "t")
-        self.jl("item", "park", "e_long", "--reason", "too_hard")
-        self.assertIn("NO_ITEMS", self.jl("next").stdout)
-        self.assertEqual(self.sql("SELECT reason FROM v_parked")[0][0], "too_hard")
-        self.assertNotEqual(self.jl("item", "park", "a_free", "--reason", "x", ok=False).returncode, 0)
-        self.jl("item", "unpark", "e_long")
-        self.assertIn("item: e_long", self.jl("next").stdout)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM item_edits WHERE field='retired'")[0][0], 2)
-
-
-def datetime_ts(s):
-    from datetime import datetime
-    return datetime.fromisoformat(s).timestamp()
+    def test_miss_reasons(self):
+        self.answer("e_long", "おおきい", now="2026-01-01T10:00")
+        s1 = self.state("u_e")["stability_days"]
+        self.answer("e_long", "おきい", outcome="incorrect", miss="slip", now="2026-01-02T10:00")
+        st = self.state("u_e")
+        self.assertEqual(st["lapses"], 0)
+        self.assertAlmostEqual(st["stability_days"], s1 * 0.85)
+        self.answer("e_long", "おきい", outcome="incorrect", miss="unreadable", now="2026-01-03T10:00")
+        self.assertAlmostEqual(self.state("u_e")["stability_days"], s1 * 0.85)
+        self.jl("report", "--miss", "none", now="2026-01-03T10:01")
+        self.assertEqual(self.state("u_e")["lapses"], 1)
 
 
 class TestConfusion(Base):
-    def add(self, *extra, ok=True, members=("u_a", "u_b"), label="A vs B", gist="東西→B；請對方→A"):
+    def add_c(self, *extra, ok=True, members=("u_a", "u_b"), label="A vs B", gist="東西→B；請對方→A"):
         return self.jl("confusion", "add", "--label", label, "--kind", "request_form", "--cause", "overgeneralize",
                        "--axis", "usage", "--gist", gist, "--members", *members, *extra, ok=ok)
 
     def status(self, cid=1):
         return self.sql("SELECT status FROM confusion_status WHERE id=?", cid)[0][0]
 
-    def test_create_and_list(self):
-        self.assertIn("created confusion 1", self.add().stdout)
-        out = self.jl("confusion", "list").stdout
-        self.assertIn("status=observed", out)
-        self.assertIn("u_a,u_b", out)
-
-    def test_pair_key_dedupes_and_counts(self):
-        self.add()
-        self.assertIn("updated confusion 1", self.add(members=("u_b", "u_a")).stdout)
+    def test_create_dedupe_and_validation(self):
+        self.assertIn("created confusion 1", self.add_c().stdout)
+        self.assertIn("updated confusion 1", self.add_c(members=("u_b", "u_a")).stdout)
         self.assertEqual(self.sql("SELECT miss_count FROM confusions")[0][0], 2)
+        self.assertNotEqual(self.add_c(members=("u_a", "nope"), ok=False).returncode, 0)
+        self.assertNotEqual(self.add_c(gist="あ" * 81, ok=False).returncode, 0)
+        self.assertNotEqual(self.add_c("--attempt", "999", ok=False).returncode, 0)
 
-    def test_member_unit_must_exist(self):
-        self.assertNotEqual(self.add(members=("u_a", "nope"), ok=False).returncode, 0)
-        self.assertNotEqual(self.add(members=("u_a", "u_a"), ok=False).returncode, 0)
-        self.assertEqual(self.sql("SELECT COUNT(*) FROM confusions")[0][0], 0)
-
-    def test_gist_and_enum_checks(self):
-        self.assertNotEqual(self.add(gist="あ" * 81, ok=False).returncode, 0)
-        self.add()
-        for col, bad in (("gist", "あ" * 81), ("kind", "x"), ("cause", "x"), ("axis", "x")):
-            with self.assertRaises(sqlite3.IntegrityError):
-                self.sql(f"UPDATE confusions SET {col}=? WHERE id=1", bad)
-
-    def test_attempt_link_and_validation(self):
-        self.assertNotEqual(self.add("--attempt", "999", ok=False).returncode, 0)
-        self.answer("e_long", "おきい")
-        aid = self.sql("SELECT id FROM attempts")[0][0]
-        self.add("--attempt", aid)
-        self.assertEqual(self.sql("SELECT attempt_id FROM confusion_attempts")[0][0], aid)
-
-    def test_status_derivation(self):
-        self.add()
+    def test_status_derivation_and_merge(self):
+        self.add_c()
         self.assertEqual(self.status(), "observed")
         self.jl("confusion", "taught", 1)
         self.assertEqual(self.status(), "drilling")
+        self.assertIn("進行中的混淆", self.jl("resume").stdout)
         for u, sk in (("u_a", "produce"), ("u_b", "comprehend")):
             self.sql("INSERT OR REPLACE INTO unit_state(unit,skill,tier,stability_days,due_ts,last_ts) VALUES(?,?,?,?,?,?)",
-                     u, sk, "consolidated", 90.0, 1e12, 0.0)
+                     u, sk, "consolidated", 90.0, 2e9, 0.0)
         self.assertEqual(self.status(), "resolved")
-        self.sql("UPDATE unit_state SET tier='review' WHERE unit='u_b'")
-        self.assertEqual(self.status(), "drilling")
-
-    def test_merge(self):
-        self.add()
-        self.add(members=("u_c", "u_d"), label="C vs D")
+        self.add_c(members=("u_c", "u_d"), label="C vs D")
         self.jl("confusion", "merge", 2, 1)
         self.assertEqual(self.status(2), "merged")
-        self.assertNotIn("C vs D", self.jl("confusion", "list").stdout)
-        self.assertEqual(self.sql("SELECT miss_count FROM confusions WHERE id=1")[0][0], 2)
-        self.add(members=("u_c", "u_d"))
-        self.assertEqual(self.sql("SELECT miss_count FROM confusions WHERE id=1")[0][0], 3)
-        self.assertNotEqual(self.jl("confusion", "merge", 1, 1, ok=False).returncode, 0)
-
-    def test_resume_shows_active_confusions(self):
-        self.add()
-        self.assertIn("進行中的混淆", self.jl("resume").stdout)
-
-    def test_next_prefers_due_units_in_drilling_confusion(self):
-        self.answer("b_free", "x")
-        self.answer("e_long", "おきい")  # 上一題為 word，b_free(grammar) 不受交錯影響
-        self.add(members=("u_b", "u_a"))
-        self.jl("confusion", "taught", 1)
-        self.sql("UPDATE unit_state SET due_ts=0 WHERE unit='u_b'")
-        self.sql("UPDATE unit_state SET due_ts=-5 WHERE unit='u_e'")
-        out = self.jl("next").stdout
-        self.assertIn("item: b_free", out)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,13 @@
 - 遷移前一律自動備份成 `data/learning.v<舊版>.bak.db`，這一點不能省。
 - 遷移測試只測一件事：從前一版遷移後有備份，而且下一輪仍出得了題（`round start`）。不為更舊的版本寫測試。
 
+## 改 schema 時不要碰真實資料庫
+- `jl.py` 任何指令（包括 `sql`、`resume`）一啟動就會自動遷移資料庫。改了 `SCHEMA_VERSION` 之後，
+  **測試跑過之前的每一次手動執行都要帶 `JL_DB=<副本路徑>`**，例如先複製 `data/learning.db` 到 scratchpad，再用
+  `JL_DB=<副本> python -X utf8 tools/jl.py ...` 試跑遷移與新指令。
+- 測試全過、在副本上確認遷移結果之後，才不帶 `JL_DB` 執行，讓真實資料庫遷移；之後馬上核對 attempts、items 筆數和遷移前一致。
+- 這段期間要查真實資料（例如 review export），在改 `SCHEMA_VERSION` 之前查完，或者對副本查。
+
 ## 改寫歷史作答
 - `unit split` 會改 `attempts.unit`：一個 unit 混了兩種用法時，舊作答跟著題目搬到新 unit，讓排程反映實際學到的用法。
   這是開發期才允許的破壞性操作，修改記在 `item_edits`。

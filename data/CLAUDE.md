@@ -5,7 +5,7 @@
 - 資料庫不存在時，任何 `jl.py` 指令會自動建立並匯入 `curriculum/seed/` 種子題庫。
 - `learning.v*.bak.db`：各次 schema 遷移前的備份，只當安全備份。開發期的遷移可以破壞性改寫（見 `../docs/development.md`）。
 
-## schema v6 的設計
+## schema v7 的設計
 資料分三層，讓 AI 能用列舉值與索引有效查詢，而不是只能按時間掃原始紀錄：
 
 1. **原始時序表（append-only，唯一真相來源）**
@@ -18,7 +18,7 @@
      `v_attempt_effective.outcome` 是改判後的結果，原始值在 `recorded_outcome`。
    - `encounters` ＋ `encounter_attempts`：**題目中看到但不認識**的元素（term、kind、看到次數、在題幹或選項、升格後的 unit）。答不出考點本身不記這裡。
    - `attempt_tags`：錯誤類型 tag（CHECK 列舉，有索引）。
-   - `item_edits`：修題歷程。`checkpoints`：`kind`＝manual/auto。
+   - `item_edits`：修題歷程（含 `unit split` 搬動題目時的 unit 欄位）。`checkpoints`：`kind`＝manual/auto。
 2. **題目與單元**
    - `units`（kind、gist）＋ `unit_skills`（unit 需要哪些 skill：comprehend/produce）。
    - `items`（`task` 參照 `task_types`）。`task_types` 是可擴充的題型列舉表（skill、grading）。
@@ -39,12 +39,12 @@
 - 時序性：舊的答對**不會被作廢**，但長期未被驗證的項目會被重新探測。「鞏固」需要跨學習日、延遲後仍能提取的證據（門檻在 `meta`）。
 
 ## 混淆表
-`confusions`（label、kind、cause、axis、gist≤80、pair_key UNIQUE、miss_count、taught_at、merged_into）＋ `confusion_members`（成員 unit）＋ `confusion_attempts`。
+`confusions`（label、kind、cause、axis、gist≤80、pair_key UNIQUE、miss_count、taught_at、merged_into、dropped_at／drop_reason）＋ `confusion_members`（成員 unit）＋ `confusion_attempts`。
 - `kind`：particle｜request_form｜politeness｜false_friend｜similar_form｜other
 - `cause`：zh_transfer｜overgeneralize｜form_mixup｜sound_mixup｜unknown
 - `axis`：form｜meaning｜usage
-- 狀態不存，由 `confusion_status` 衍生：taught_at 為空＝observed；已講解且成員有任一 unit 未 consolidated＝drilling；全部 consolidated＝resolved；merged。
-- 只在「兩個合理選項選錯」時建立；`answer` 的 `CONFUSION_CANDIDATE` 只是提示。以 `jl.py confusion add/taught/merge/list` 操作。
+- 狀態不存，由 `confusion_status` 衍生：taught_at 為空＝observed；已講解且成員有任一 unit 未 consolidated＝drilling；全部 consolidated＝resolved；merged；dropped（證據不成立而撤銷，例如事後自述是看不懂詞）。
+- 只在「兩個合理選項選錯」時建立；`answer` 的 `CONFUSION_CANDIDATE` 只是提示。以 `jl.py confusion add/taught/merge/drop/list` 操作。
 
 ## rounds/
 **暫存區**，放 subagent 產出的整輪題目與審題紀錄；讀取請用明確完整路徑。匯入完成後即刪除，正常狀態下此目錄應為空（見 `../rules/subagent-policy.md`）。

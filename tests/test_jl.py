@@ -200,6 +200,13 @@ class TestRecord(Base):
         s1 = self.add("e_long")
         out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
         self.assertIn("ROUND_COMPLETE", out)
+        self.assertNotIn("END_OF_REPLY", out)  # 一輪結束時還要 checkpoint 與回報
+
+    def test_mid_round_record_ends_reply(self):
+        s1 = self.add("e_long")
+        self.jl("round", "add", "b_free")
+        out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
+        self.assertEqual(out.strip().splitlines()[-1].split("：")[0], "END_OF_REPLY")
 
 
 class TestLearnDay(Base):
@@ -543,33 +550,29 @@ class TestSessionAndCheckpoint(Base):
         self.assertIn("u_e", cp["summary"])
 
 
-class TestMigrationV5(Base):
-    def test_v5_migrates_and_next_round_works(self):
+class TestMigrationV6(Base):
+    def test_v6_migrates_and_next_round_works(self):
         """依 docs/development.md：只驗證遷移後有備份、下一輪仍出得了題。"""
-        r = subprocess.run(["git", "show", "baf00b5:tools/jl.py"], cwd=ROOT, capture_output=True)
+        r = subprocess.run(["git", "show", "7193671:tools/jl.py"], cwd=ROOT, capture_output=True)
         if r.returncode:
-            self.skipTest("git 歷史中找不到 v5 版 jl.py")
-        old = Path(self.tmp.name) / "jl_v5.py"
+            self.skipTest("git 歷史中找不到 v6 版 jl.py")
+        old = Path(self.tmp.name) / "jl_v6.py"
         old.write_bytes(r.stdout)
         self.db.unlink()
-        seed5 = Path(self.tmp.name) / "seed5"
-        seed5.mkdir()
-        items = [{k: v for k, v in it.items() if k != "judge"} for it in SEED["items"]]
-        (seed5 / "t.json").write_text(json.dumps(dict(SEED, items=items), ensure_ascii=False), encoding="utf-8")
-        env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(seed5), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(self.seed), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
 
-        def old_jl(*a):
+        def old_jl(*a, stdin=None):
             p = subprocess.run([sys.executable, "-X", "utf8", str(old), *map(str, a)], capture_output=True,
-                               text=True, encoding="utf-8", env=env)
+                               text=True, encoding="utf-8", env=env, input=stdin)
             self.assertEqual(p.returncode, 0, p.stderr)
             return p.stdout
-        pid = int(old_jl("present", "e_long").split("presentation: ")[1].split()[0])
-        old_jl("answer", pid, "おきい")
+        out = old_jl("round", "add", "e_long")
+        seq = int(out.split("added seq ")[1].split()[0])
+        old_jl("record", stdin=json.dumps([{"seq": seq, "answer": "おきい", "outcome": "incorrect"}]))
         old_jl("checkpoint", "--summary", "s")
-        r = self.jl("round", "start", now="2026-01-02T10:00")
-        self.assertIn("v5 -> v6", r.stderr)
-        self.assertTrue((self.db.parent / "learning.v5.bak.db").exists())
-        self.assertIn("ROUND 1 開始", r.stdout)
+        r = self.jl("round", "start", "--new-round", now="2026-01-02T10:00")
+        self.assertIn("v6 -> v7", r.stderr)
+        self.assertTrue((self.db.parent / "learning.v6.bak.db").exists())
         self.assertIn("e_long", r.stdout)  # 舊的錯題仍會再出現
 
 
@@ -642,6 +645,36 @@ class TestConfusion(Base):
         self.add_c(members=("u_c", "u_d"), label="C vs D")
         self.jl("confusion", "merge", 2, 1)
         self.assertEqual(self.status(2), "merged")
+
+    def test_drop_removes_from_active(self):
+        self.add_c()
+        self.jl("confusion", "taught", 1)
+        self.assertIn("dropped 1", self.jl("confusion", "drop", 1, "--reason", "事後自述 miss=probe").stdout)
+        self.assertEqual(self.status(), "dropped")
+        self.assertNotIn("進行中的混淆", self.jl("resume").stdout)
+        self.assertIn("no active confusion 1", self.jl("confusion", "drop", 1, "--reason", "x").stdout)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM confusions")[0][0], 1)  # 紀錄保留
+
+
+class TestUnitSplit(Base):
+    def test_split_moves_items_and_attempts(self):
+        self.answer("c_choice", "A", outcome="correct")
+        self.answer("c_cloze", "に", outcome="incorrect", now="2026-01-01T11:00")
+        r = self.jl("unit", "split", "u_c", "--new", "u_c_means", "--items", "c_cloze",
+                    "--gist", "交通手段→で")
+        self.assertIn("1 題、1 筆作答", r.stdout)
+        self.assertEqual(self.sql("SELECT unit FROM items WHERE key='c_cloze'")[0][0], "u_c_means")
+        self.assertEqual(self.sql("SELECT unit FROM attempts WHERE outcome='incorrect'")[0][0], "u_c_means")
+        stats = lambda u, sk: self.sql("SELECT n, n_incorrect FROM unit_stats WHERE unit=? AND skill=?", u, sk)
+        self.assertEqual(stats("u_c", "produce"), [])            # 原 unit 不再背這次答錯
+        self.assertEqual(tuple(stats("u_c_means", "produce")[0]), (1, 1))
+        self.assertIsNotNone(self.state("u_c_means", "produce"))
+        self.assertEqual(self.sql("SELECT old, new FROM item_edits WHERE field='unit'")[0][:], ("u_c", "u_c_means"))
+        self.assertEqual([r[0] for r in self.sql("SELECT skill FROM unit_skills WHERE unit='u_c'")], ["comprehend"])
+        self.assertNotEqual(self.jl("unit", "split", "u_c", "--new", "u_x", "--items", "a_free", "--gist", "g",
+                                    ok=False).returncode, 0)
+        self.assertNotEqual(self.jl("unit", "split", "u_c", "--new", "u_c_means", "--items", "c_choice",
+                                    "--gist", "g", ok=False).returncode, 0)
 
 
 if __name__ == "__main__":

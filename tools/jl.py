@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("JL_DB") or ROOT / "data" / "learning.db")
 SEED_DIR = Path(os.environ.get("JL_SEED") or ROOT / "curriculum" / "seed")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DEFAULT_META = {
     "stage": "0",
@@ -70,7 +70,7 @@ TAGS = ("particle", "conjugation", "vocab", "kana_form", "long_vowel", "sokuon",
 CONF_KINDS = ("particle", "request_form", "politeness", "false_friend", "similar_form", "other")
 CONF_CAUSES = ("zh_transfer", "overgeneralize", "form_mixup", "sound_mixup", "unknown")
 CONF_AXES = ("form", "meaning", "usage")
-CONF_STATUSES = ("observed", "drilling", "resolved", "merged")
+CONF_STATUSES = ("observed", "drilling", "resolved", "merged", "dropped")
 
 # 初始題型；之後用 `jl.py task add` 擴充（不必改 schema）
 DEFAULT_TASKS = (
@@ -264,7 +264,8 @@ CREATE TABLE IF NOT EXISTS confusions(
   miss_count INTEGER NOT NULL DEFAULT 1,
   first_seen REAL NOT NULL, last_seen REAL NOT NULL,
   taught_at REAL, taught_session INTEGER,
-  merged_into INTEGER REFERENCES confusions(id)
+  merged_into INTEGER REFERENCES confusions(id),
+  dropped_at REAL, drop_reason TEXT    -- 證據不成立而撤銷（例如事後自述是看不懂詞，不是對比錯誤）
 );
 CREATE TABLE IF NOT EXISTS confusion_members(
   confusion_id INTEGER NOT NULL REFERENCES confusions(id),
@@ -392,6 +393,7 @@ FROM v_attempt_effective WHERE miss IS NOT NULL AND outcome!='correct' GROUP BY 
 SELECT c.id AS id,
   CASE
     WHEN c.merged_into IS NOT NULL THEN 'merged'
+    WHEN c.dropped_at IS NOT NULL THEN 'dropped'
     WHEN c.taught_at IS NULL THEN 'observed'
     WHEN EXISTS(SELECT 1 FROM confusion_members m LEFT JOIN v_unit_status v ON v.unit=m.unit
                 WHERE m.confusion_id=c.id AND COALESCE(v.status,'new')!='consolidated') THEN 'drilling'
@@ -418,7 +420,7 @@ VIEW_DOCS = {
     "v_encounters": "題目中看到但不認識的元素：open（未升格）/linked、看到次數、是否為刻意放入的 probe",
     "v_parked": "暫停出題（整題看不懂等）的題目，與其 encounter 的 unit 進度（判斷何時 unpark）",
     "v_miss_reasons": "答錯原因自述（slip/probe/unreadable）× unit 次數",
-    "confusion_status": "混淆對狀態 observed/drilling/resolved/merged",
+    "confusion_status": "混淆對狀態 observed/drilling/resolved/merged/dropped",
 }
 
 
@@ -508,9 +510,8 @@ def migrate_copy(path, old_version):
 
 def _post_migrate(con, old_version):
     """各版遷移後的值調整（AI 決定，只要下一輪測驗仍有意義）。"""
-    if old_version < 6:
-        # v5 沒有 rounds：舊的出題不屬於任何一輪；舊的 round_closed 旗標改由 rounds 表表示（無進行中的一輪）
-        pass
+    # v6 -> v7：confusions 加 dropped_at／drop_reason（新欄位預設 NULL），不需調整舊值
+    pass
 
 
 def meta(con, key):
@@ -1343,6 +1344,7 @@ def cmd_record(con, args):
     r = open_round(con)
     if r["next_seq"]:
         print(f"本輪：已記錄 {r['recorded']}/{r['planned']}，下一題 seq {r['next_seq']}")
+        print("END_OF_REPLY：下一題已在這則回覆的文字裡。到此結束回覆，不要再輸出任何文字（不確認、不重印題目）。")
     else:
         print(f"ROUND_COMPLETE: 本輪 {r['planned']} 題已全部記錄。做手動 checkpoint 結束本輪、回報，等使用者指示。")
 
@@ -1653,6 +1655,8 @@ def cmd_unit(con, args):
     u = con.execute("SELECT * FROM v_unit_status WHERE unit=?", (args.unit,)).fetchone()
     if not u:
         raise SystemExit(f"no such unit: {args.unit}")
+    if args.action == "split":
+        return unit_split(con, args, u)
     if args.action == "set":
         if args.gist is not None:
             if len(args.gist) > 80:
@@ -1800,6 +1804,44 @@ def cmd_rebuild(con, args):
 
 
 # --------------------------------------------------------------------------- 混淆表
+def unit_split(con, args, u):
+    """一個 unit 混了兩種用法時拆開（docs/development.md：開發期允許改寫作答所屬的 unit）。
+    題目與其作答一起搬到新 unit，兩邊重算排程；混淆成員與其他題的誘答項對應不動。"""
+    keys = [k.strip() for k in args.items.split(",") if k.strip()]
+    if con.execute("SELECT 1 FROM units WHERE unit=?", (args.new,)).fetchone():
+        raise SystemExit(f"unit 已存在：{args.new}")
+    if len(args.gist) > 80:
+        raise SystemExit("gist 超過 80 字")
+    items = []
+    for k in keys:
+        it = con.execute("SELECT * FROM items WHERE key=?", (k,)).fetchone()
+        if not it or it["unit"] != args.unit:
+            raise SystemExit(f"{k} 不存在或不屬於 {args.unit}")
+        items.append(it)
+    if not items:
+        raise SystemExit("--items 是空的")
+    ts = now_ts()
+    con.execute("INSERT INTO units(unit,kind,label,jp,zh,stage,gist) VALUES(?,?,?,?,?,?,?)",
+                (args.new, u["kind"], args.label, args.jp, args.zh, u["stage"], args.gist))
+    for it in items:
+        con.execute("INSERT INTO item_edits(item_id,ts,field,old,new) VALUES(?,?,?,?,?)",
+                    (it["id"], ts, "unit", args.unit, args.new))
+        con.execute("UPDATE items SET unit=? WHERE id=?", (args.new, it["id"]))
+        con.execute("UPDATE attempts SET unit=? WHERE item_id=?", (args.new, it["id"]))
+        con.execute("UPDATE attempts SET picked_unit=? WHERE item_id=? AND picked_unit=?",
+                    (args.new, it["id"], args.unit))
+        con.execute("INSERT OR IGNORE INTO unit_skills(unit,skill) SELECT ?, skill FROM task_types WHERE task=?",
+                    (args.new, it["task"]))
+    con.execute("DELETE FROM unit_skills WHERE unit=? AND skill NOT IN "
+                "(SELECT t.skill FROM items i JOIN task_types t ON t.task=i.task WHERE i.unit=?)", (args.unit, args.unit))
+    cfg = cfg_of(con)
+    refresh_unit(con, args.unit, cfg)
+    refresh_unit(con, args.new, cfg)
+    con.commit()
+    n = con.execute("SELECT COUNT(*) FROM attempts WHERE unit=?", (args.new,)).fetchone()[0]
+    print(f"split {args.unit} -> {args.new}: {len(items)} 題、{n} 筆作答已搬移並重算排程")
+
+
 def confusion_list(con, args, active_only=False):
     q = "SELECT c.*, v.status FROM confusions c JOIN confusion_status v ON v.id=c.id WHERE 1=1"
     params = []
@@ -1809,7 +1851,7 @@ def confusion_list(con, args, active_only=False):
         q += " AND v.status=?"
         params.append(args.status)
     else:
-        q += " AND v.status!='merged'"
+        q += " AND v.status NOT IN ('merged','dropped')"
     if args.kind:
         q += " AND c.kind=?"
         params.append(args.kind)
@@ -1862,15 +1904,17 @@ def cmd_confusion(con, args):
         con.commit()
         print(f"{verb} confusion {cid}: {args.label}")
     elif act == "taught":
-        n = con.execute("UPDATE confusions SET taught_at=?, taught_session=? WHERE id=? AND merged_into IS NULL",
+        n = con.execute("UPDATE confusions SET taught_at=?, taught_session=? WHERE id=? AND merged_into IS NULL "
+                        "AND dropped_at IS NULL",
                         (now_ts(), current_session(con, create=True), args.id)).rowcount
         con.commit()
         print(f"taught {args.id}" if n else f"no active confusion {args.id}")
     elif act == "merge":
         if args.id == args.into:
             raise SystemExit("不能併入自己")
-        a = con.execute("SELECT * FROM confusions WHERE id=? AND merged_into IS NULL", (args.id,)).fetchone()
-        b = con.execute("SELECT * FROM confusions WHERE id=? AND merged_into IS NULL", (args.into,)).fetchone()
+        q = "SELECT * FROM confusions WHERE id=? AND merged_into IS NULL AND dropped_at IS NULL"
+        a = con.execute(q, (args.id,)).fetchone()
+        b = con.execute(q, (args.into,)).fetchone()
         if not a or not b:
             raise SystemExit("來源或目標不存在或已被併入")
         con.execute("UPDATE confusions SET merged_into=? WHERE id=?", (args.into, args.id))
@@ -1882,6 +1926,11 @@ def cmd_confusion(con, args):
                     "WHERE confusion_id=?", (args.into, args.id))
         con.commit()
         print(f"merged {args.id} -> {args.into}")
+    elif act == "drop":  # 證據不成立（例如事後自述 miss=probe／unreadable）：撤銷，紀錄保留
+        n = con.execute("UPDATE confusions SET dropped_at=?, drop_reason=? WHERE id=? AND merged_into IS NULL "
+                        "AND dropped_at IS NULL", (now_ts(), args.reason, args.id)).rowcount
+        con.commit()
+        print(f"dropped {args.id}: {args.reason}" if n else f"no active confusion {args.id}")
     elif act == "list":
         confusion_list(con, args)
 
@@ -1926,6 +1975,10 @@ def build_parser():
     ts.add_parser("list")
     p = sub.add_parser("unit"); us = p.add_subparsers(dest="action", required=True)
     q = us.add_parser("show"); q.add_argument("unit")
+    q = us.add_parser("split", help="把一個 unit 裡另一種用法的題目（連同作答）拆成新 unit")
+    q.add_argument("unit"); q.add_argument("--new", required=True); q.add_argument("--items", required=True,
+                                                                                    help="逗號分隔的 item key")
+    q.add_argument("--gist", required=True); q.add_argument("--label"); q.add_argument("--jp"); q.add_argument("--zh")
     q = us.add_parser("set"); q.add_argument("unit"); q.add_argument("--gist"); q.add_argument("--label")
     q.add_argument("--add-skill", choices=SKILLS, action="append")
     p = sub.add_parser("item"); its = p.add_subparsers(dest="action", required=True)
@@ -1953,6 +2006,8 @@ def build_parser():
     q.add_argument("--members", nargs="+", required=True); q.add_argument("--attempt", type=int, nargs="*")
     q = cs.add_parser("taught"); q.add_argument("id", type=int)
     q = cs.add_parser("merge"); q.add_argument("id", type=int); q.add_argument("into", type=int)
+    q = cs.add_parser("drop", help="撤銷證據不成立的混淆（不刪除）"); q.add_argument("id", type=int)
+    q.add_argument("--reason", required=True)
     q = cs.add_parser("list"); q.add_argument("--status", choices=CONF_STATUSES)
     q.add_argument("--kind", choices=CONF_KINDS); q.add_argument("--unit")
     q.add_argument("--untaught", action="store_true"); q.add_argument("--limit", type=int, default=20)

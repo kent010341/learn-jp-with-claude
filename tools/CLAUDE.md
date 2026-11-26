@@ -9,7 +9,7 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `resume [--hook] [--source startup\|resume\|clear\|compact]` | 顯示階段、checkpoint、到期、弱點、混淆、題庫缺口。由 SessionStart hook 自動執行；compact／resume 沿用同一 session，其餘開新 session |
 | `round start [-n N] [--new-round]` | 一次排好整輪（到期的 unit、未作答過的新題至少 `new_item_ratio`、再補最易忘的；每個 unit 一輪一題；交錯類型與題型），輸出每題的資料卡（含答案、判分準則、probe，**只給 AI 看**）。本輪還沒記錄完時回 `ROUND_OPEN` 並列出剩下的題；全部記錄完回 `ROUND_COMPLETE`；上一輪已 checkpoint 結束時回 `ROUND_CLOSED`，使用者明確說開始／繼續才加 `--new-round` |
 | `round status` / `round add <item_key>` | 本輪進度／把指定題目加到本輪最後（使用者要求重考） |
-| `record [--file f]` | 從 stdin 讀 JSON（一題或多題）寫入作答，見下方格式。`outcome` 由 AI 判斷；選擇題與讀音題另跑程式稽核，不一致時印 `AUDIT`；選到另一個 unit 的誘答項時印 `CONFUSION_CANDIDATE`。整批先驗證再寫入；同一題只能記一次 |
+| `record [--file f]` | 從 stdin 讀 JSON（一題或多題）寫入作答，見下方格式。本輪還沒結束時最後一行是 `END_OF_REPLY`：結果回來就結束回覆、不再輸出文字。`outcome` 由 AI 判斷；選擇題與讀音題另跑程式稽核，不一致時印 `AUDIT`；選到另一個 unit 的誘答項時印 `CONFUSION_CANDIDATE`。整批先驗證再寫入；同一題只能記一次 |
 | `report [--attempt id] [--confidence ..] [--basis ..] [--miss ..] [--outcome ..] [--note ..] [--phase after_feedback\|with_answer]` | 事後補記自述（預設最後一筆、after_feedback）。值寫 `none`＝撤回先前的值；`--outcome` 是改判（phase=correction）。另存一列，排程依最新值重算 |
 | `seen add --term "<詞>" --kind word\|grammar\|expression --attempt <id> [--where prompt\|choice] [--reading ..] [--zh ..] [--unit ..]` | 記錄**題目中看到但不認識**的元素（答不出考點本身不記）；同 term 再加會累計 |
 
@@ -31,13 +31,14 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `import <round.json>` | 匯入題目（以 key 去重；需先經 reviewer 通過；未知題型、重複使用的 `round_id`、超過 5 個 answers 的產出題會被拒絕）。匯入後 `resume` 會提醒新題已備好 |
 | `task add <name> --skill comprehend\|produce --grading auto\|auto_then_judge\|judge --desc ".."` / `task list` | 新增／列出題型 |
 | `unit set <unit> [--gist ..] [--label ..] [--add-skill ..]` | 修改 unit 重點或宣告 skill |
+| `unit split <unit> --new <新 unit> --items <key,...> --gist ".." [--label ..] [--jp ..] [--zh ..]` | 一個 unit 混了兩種用法時拆開：題目連同作答搬到新 unit、記入 `item_edits`、兩邊重算排程（開發期允許，見 `../docs/development.md`） |
 | `item edit <key> [--set-answers '<JSON list>'] [--add-answer ..] [--remove-answer ..] [--judge ..] [--probe ..] [--explain ..] [--zh ..] [--reading ..] [--prompt ..]` | 修題，舊值存入 `item_edits`；產出題 answers 最多 5 個 |
 | `retire <key> --reason ".."` | 停用題目（不再出題，紀錄保留） |
 | `item park <key> --reason ".."` / `item unpark <key>` | 暫停／恢復出題（例如整題看不懂），與永久 retire 區分；暫停中的題目見 `v_parked` |
 | `seen link <id\|term> <unit>` | 把未知元素連到 unit（匯入時也可用 units 段的 `from_encounter`） |
 | `stage [n]` | 查看／設定階段（新題只從 stage <= n 抽） |
 | `rebuild` | 由 attempts＋自述重算全部 `unit_state`、`unit_stats` |
-| `confusion add/taught/merge` | 見 `../rules/quiz-protocol.md` 與 `../data/CLAUDE.md` |
+| `confusion add/taught/merge/drop` | `drop <id> --reason ..`：證據不成立時撤銷（保留紀錄）。見 `../rules/quiz-protocol.md` 與 `../data/CLAUDE.md` |
 
 ## 題目 JSON 格式（seed 與 `data/rounds/*.json` 共用）
 ```json

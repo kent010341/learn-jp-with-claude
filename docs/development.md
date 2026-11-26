@@ -13,6 +13,10 @@
 - 遷移前一律自動備份成 `data/learning.v<舊版>.bak.db`，這一點不能省。
 - 遷移測試只測一件事：從前一版遷移後有備份，而且下一輪仍出得了題（`round start`）。不為更舊的版本寫測試。
 
+## 改寫歷史作答
+- `unit split` 會改 `attempts.unit`：一個 unit 混了兩種用法時，舊作答跟著題目搬到新 unit，讓排程反映實際學到的用法。
+  這是開發期才允許的破壞性操作，修改記在 `item_edits`。
+
 ## 其他
 - 規則的依據（文獻）放 `references/`，格式見 `references/README.md`。
 - 每次優化後跑 `python -X utf8 -m unittest discover -s tests -v`。

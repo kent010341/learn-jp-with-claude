@@ -23,7 +23,8 @@ tools: Read, Write, Bash, Glob
 - 使用者單字量低、略懂初級文法；難度以「需要努力但多數答得出」為目標。
 - 題型多元交錯，不受限現有幾種：選擇、哪句自然、讀音、意思、情境回應、情境翻譯、排序構句、挖空…；
   現有題型都不適合時，在回覆中提出新題型名稱、skill、grading 與一句說明，由主對話用 `jl.py task add` 建立後再匯入。
-- 每個新 unit 在 `units` 段宣告 `kind`、`label`、`gist`（≤80 字的一行判斷線索）。要練構句的 unit 宣告 `skills: ["comprehend","produce"]`，並至少出一題產出題。
+- 每個新 unit 在 `units` 段宣告 `kind`、`label`、`gist`（≤80 字的一行判斷線索）。一個 unit 只放一種用法（content-policy「一個 unit 只放一種用法」）：
+  新用法（例如交通手段的で）出成新 unit，不要把題目掛在只有另一種用法的既有 unit 底下。要練構句的 unit 宣告 `skills: ["comprehend","produce"]`，並至少出一題產出題。
 - 選擇式題目的誘答項若是另一個既有 unit（例如で／に），寫成 `{"text": "に", "unit": "<該 unit>"}`，用 `jl.py sql "SELECT unit, jp FROM units"` 查既有 unit。
 - 「新情境變體」：沿用同一 `unit`、新的 `key`、**不同的 `scenario` 與題幹**，不要只換字面；避開 `jl.py variants` 列出的已用情境。
 - 產出題**不窮舉答案**：`answers` 只放 1–3 個參考答案（匯入上限 5 個），另寫 `judge`：考點、什麼算對、可接受的考點以外差異。

@@ -24,6 +24,13 @@
 - `unit split` 會改 `attempts.unit`：一個 unit 混了兩種用法時，舊作答跟著題目搬到新 unit，讓排程反映實際學到的用法。
   這是開發期才允許的破壞性操作，修改記在 `item_edits`。
 
+## 假練習 e2e
+- `python -X utf8 tools/e2e_practice.py [--n 5] [--keep]`：用 headless 的 `claude -p`（Sonnet、`--permission-mode auto`）在資料庫副本上跑一輪短練習，
+  腳本扮演學習者（奇數題答對、偶數題答錯），檢查每題回覆：回饋與下一題在 `record` 之前、之後只回「（已記錄）」、attempts 剛好多一筆、最後 checkpoint 關閉本輪。
+- 什麼時候跑：改了 `rules/quiz-protocol.md` 的出題流程，或 `record`／`round start` 的輸出之後。會花 API 費用（5 題約 6 次呼叫），不放進 unittest。
+- 需要 CLI 已登入（認證失敗會直接停下並說明）；真實資料庫不會被動到，跑完會核對 attempts 筆數。
+- 涵蓋不到：桌面 app 的 ccd_turn 工具（`update_plan`／`wrap_up`）、回覆還沒結束就送出下一則（搶答）。這兩項只能在 app 裡實際練習時看。
+
 ## 其他
 - 規則的依據（文獻）放 `references/`，格式見 `references/README.md`。
 - 每次優化後跑 `python -X utf8 -m unittest discover -s tests -v`。

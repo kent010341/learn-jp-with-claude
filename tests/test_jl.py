@@ -209,6 +209,7 @@ class TestRecord(Base):
         last = out.strip().splitlines()[-1]
         self.assertEqual(last.split("：")[0], "END_OF_REPLY")
         self.assertIn("wrap_up", last)  # app 的收尾工具會讓先寫的回饋與下一題消失
+        self.assertIn("（已記錄）", last)  # 工具後完全沒文字時 harness 會要求補輸出，模型就重印題目
 
 
 class TestLearnDay(Base):

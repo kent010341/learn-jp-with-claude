@@ -26,7 +26,10 @@
    所以固定回這一行。
    **從第 1 題出現到 `ROUND_COMPLETE`，每題的回覆只有「文字（回饋＋下一題）→ `record`」，不呼叫 app 的 `update_plan`、`wrap_up`**：
    app 的收尾工具要求文字放在它之後，和後寫衝突，會讓回饋與下一題消失。
-   任務清單與 `wrap_up` 只用在開場備題那一則（第 1 題的文字放在 `wrap_up` 之後），以及一輪結束的 checkpoint 與報告。用 Bash 工具的 heredoc 傳 JSON（PowerShell 的管線會弄壞日文）：
+   任務清單與 `wrap_up` 只用在開場備題那一則（第 1 題的文字放在 `wrap_up` 之後），以及一輪結束的 checkpoint 與報告。
+   **最後一題例外**（`record` 印出 `LAST_QUESTION` 時，下一題就是最後一題）：使用者答完最後一題，那則回覆先不寫文字，
+   `record` → checkpoint →（`wrap_up`）→ 最後才把這題的回饋和本輪報告一起寫出。之後沒有下一題，不必搶時間；
+   而寫在 `wrap_up` 之前的文字會被 app 縮成一行摘要。用 Bash 工具的 heredoc 傳 JSON（PowerShell 的管線會弄壞日文）：
    ```
    python -X utf8 tools/jl.py record <<'EOF'
    [{"seq": 3, "answer": "<使用者原文>", "outcome": "incorrect", "tags": ["particle"], "note": "..."}]
@@ -56,6 +59,9 @@
   - 這是發現缺漏，**不得說成題目的問題**，也不說成使用者的失敗；回饋時用一兩行說明那個詞，不展開成講義。
   - 只在使用者答錯相關、或主動問到時才說明；答對且沒問就只記錄、不講解（仍守「先測驗再講解」）。
   - 記錄後會出現在 `resume`／`variants`，由 generator 出成新 unit 來測。
+- **作答時想用但不會的詞**（考點以外；使用者用 `<中文>` placeholder 代替，或說「〇〇不會說」）：`seen` 記 `"where": "answer"`，
+  term 寫日文（例如 placeholder `<位子>` 記 `席`），附 reading 與 zh。考點本身不會說就是一般的答錯，不記這裡。
+  - placeholder 以外的部分照常判斷（句型、助詞錯了照樣指出）；回饋時用一行告訴他那個詞怎麼說。
 - **整題看不懂**、無法對考點作答（使用者自述）：
   - 先讓使用者照常嘗試或說不懂，然後**立即**給整句翻譯與一兩個關鍵點，當作一次讀懂的範例，不當成測驗。
   - 該題記 `"miss": "unreadable"`：這次不算考點的失誤，也不算進步。

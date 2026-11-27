@@ -132,6 +132,8 @@ def check_answer_turn(seq_events, raw, answered_seq, next_seq):
     before, after = "\n".join(texts_before), "\n".join(texts_after).strip()
     if next_seq and not any(f in before for f in (f"第 {next_seq} 題", f"第{next_seq}題")):
         problems.append(f"record 之前的文字沒有第 {next_seq} 題")
+    if not next_seq and before.strip():  # 最後一題：先 record、checkpoint，回饋和報告寫在最後
+        problems.append(f"最後一題在 record 之前就寫了文字：{before[:60]!r}")
     if next_seq:
         if "已記錄" not in after or len(after) > 20:
             problems.append(f"record 之後不是只有「（已記錄）」：{after[:80]!r}")

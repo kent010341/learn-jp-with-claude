@@ -200,7 +200,10 @@ class TestRecord(Base):
         s1 = self.add("e_long")
         out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
         self.assertIn("ROUND_COMPLETE", out)
+        self.assertIn("答對 1", out)  # 本輪答對數由 v_attempt_effective 的 round_id 直接算
         self.assertNotIn("END_OF_REPLY", out)  # 一輪結束時還要 checkpoint 與回報
+        r = self.sql("SELECT round_id, seq FROM v_attempt_effective")[0]
+        self.assertEqual((r["round_id"], r["seq"]), (1, s1))
 
     def test_mid_round_record_ends_reply(self):
         s1 = self.add("e_long")
@@ -210,6 +213,14 @@ class TestRecord(Base):
         self.assertEqual(last.split("：")[0], "END_OF_REPLY")
         self.assertIn("wrap_up", last)  # app 的收尾工具會讓先寫的回饋與下一題消失
         self.assertIn("（已記錄）", last)  # 工具後完全沒文字時 harness 會要求補輸出，模型就重印題目
+        self.assertIn("LAST_QUESTION", out)  # 下一題是最後一題：那則回覆先 record、最後才寫回饋＋報告
+
+    def test_no_last_question_hint_earlier(self):
+        s1 = self.add("e_long")
+        self.jl("round", "add", "b_free")
+        self.jl("round", "add", "d_free")
+        out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
+        self.assertNotIn("LAST_QUESTION", out)
 
 
 class TestLearnDay(Base):
@@ -565,13 +576,13 @@ class TestSessionAndCheckpoint(Base):
         self.assertIn("u_e", cp["summary"])
 
 
-class TestMigrationV6(Base):
-    def test_v6_migrates_and_next_round_works(self):
+class TestMigrationV7(Base):
+    def test_v7_migrates_and_next_round_works(self):
         """依 docs/development.md：只驗證遷移後有備份、下一輪仍出得了題。"""
-        r = subprocess.run(["git", "show", "7193671:tools/jl.py"], cwd=ROOT, capture_output=True)
+        r = subprocess.run(["git", "show", "6a58c3f:tools/jl.py"], cwd=ROOT, capture_output=True)
         if r.returncode:
-            self.skipTest("git 歷史中找不到 v6 版 jl.py")
-        old = Path(self.tmp.name) / "jl_v6.py"
+            self.skipTest("git 歷史中找不到 v7 版 jl.py")
+        old = Path(self.tmp.name) / "jl_v7.py"
         old.write_bytes(r.stdout)
         self.db.unlink()
         env = dict(os.environ, JL_DB=str(self.db), JL_SEED=str(self.seed), JL_NOW=self.now, PYTHONIOENCODING="utf-8")
@@ -586,8 +597,8 @@ class TestMigrationV6(Base):
         old_jl("record", stdin=json.dumps([{"seq": seq, "answer": "おきい", "outcome": "incorrect"}]))
         old_jl("checkpoint", "--summary", "s")
         r = self.jl("round", "start", "--new-round", now="2026-01-02T10:00")
-        self.assertIn("v6 -> v7", r.stderr)
-        self.assertTrue((self.db.parent / "learning.v6.bak.db").exists())
+        self.assertIn("v7 -> v8", r.stderr)
+        self.assertTrue((self.db.parent / "learning.v7.bak.db").exists())
         self.assertIn("e_long", r.stdout)  # 舊的錯題仍會再出現
 
 
@@ -606,6 +617,15 @@ class TestEncountersAndPark(Base):
         self.assertEqual(self.sql("SELECT status FROM v_encounters")[0][0], "linked")
         self.assertNotEqual(self.jl("seen", "add", "--term", "x", "--kind", "word", "--attempt", 999,
                                     ok=False).returncode, 0)
+
+    def test_seen_where_answer(self):
+        """作答時想用但不會的詞（例如以 placeholder 作答）記為 where=answer。"""
+        self.answer("a_free", "<席>お願いします", outcome="incorrect",
+                    seen=[{"term": "席", "kind": "word", "where": "answer", "reading": "せき", "zh": "位子"}])
+        r = self.sql("SELECT n_wanted, attempts FROM v_encounters WHERE term='席'")[0]
+        self.assertEqual(r["n_wanted"], 1)
+        self.assertTrue(r["attempts"].endswith(":answer"))
+        self.assertIn("想用但不會=1", self.jl("variants").stdout)
 
     def test_from_encounter_import(self):
         self.answer("e_long", "おおきい")

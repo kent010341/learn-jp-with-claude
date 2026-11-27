@@ -5,7 +5,7 @@
 - 資料庫不存在時，任何 `jl.py` 指令會自動建立並匯入 `curriculum/seed/` 種子題庫。
 - `learning.v*.bak.db`：各次 schema 遷移前的備份，只當安全備份。開發期的遷移可以破壞性改寫（見 `../docs/development.md`）。
 
-## schema v7 的設計
+## schema v8 的設計
 資料分三層，讓 AI 能用列舉值與索引有效查詢，而不是只能按時間掃原始紀錄：
 
 1. **原始時序表（append-only，唯一真相來源）**
@@ -15,8 +15,8 @@
      `learn_day`＝以凌晨 4:00 為日界的學習日（有索引）；選擇題存 `picked_text` 與 `picked_unit`（選到哪個誘答項）。
    - `attempt_reports`：使用者自述（`confidence`、`basis`、`miss`＝slip/probe/unreadable、`note`）與改判（`outcome`），
      `phase`＝with_answer/after_feedback/correction。不覆寫 attempt；各欄位最新的非空值有效，`none`＝撤回。
-     `v_attempt_effective.outcome` 是改判後的結果，原始值在 `recorded_outcome`。
-   - `encounters` ＋ `encounter_attempts`：**題目中看到但不認識**的元素（term、kind、看到次數、在題幹或選項、升格後的 unit）。答不出考點本身不記這裡。
+     `v_attempt_effective.outcome` 是改判後的結果，原始值在 `recorded_outcome`；`round_id`／`seq` 是所屬輪次（算一輪答對數直接用）。
+   - `encounters` ＋ `encounter_attempts`：**題目中看到但不認識**（location＝prompt／choice）或**作答時想用但不會**（answer）的元素（term、kind、次數、升格後的 unit；`v_encounters.n_wanted`＝想用但不會的次數）。答不出考點本身不記這裡。
    - `attempt_tags`：錯誤類型 tag（CHECK 列舉，有索引）。
    - `item_edits`：修題歷程（含 `unit split` 搬動題目時的 unit 欄位）。`checkpoints`：`kind`＝manual/auto。
 2. **題目與單元**

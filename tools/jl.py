@@ -27,7 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = Path(os.environ.get("JL_DB") or ROOT / "data" / "learning.db")
 SEED_DIR = Path(os.environ.get("JL_SEED") or ROOT / "curriculum" / "seed")
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 DEFAULT_META = {
     "stage": "0",
@@ -64,7 +64,7 @@ NONE = "none"                                   # 自述欄位寫 none＝撤回�
 MISSES = ("slip", "probe", "unreadable")
 LIGHT_MISSES = ("slip", "probe")            # 輕度失誤：有量到一部分
 ENCOUNTER_KINDS = ("word", "grammar", "expression")
-ENCOUNTER_LOCATIONS = ("prompt", "choice")
+ENCOUNTER_LOCATIONS = ("prompt", "choice", "answer")   # answer＝作答時想用但不會（產出時缺的詞）
 TAGS = ("particle", "conjugation", "vocab", "kana_form", "long_vowel", "sokuon", "register",
         "word_order", "unnatural", "omission", "meaning", "other")
 CONF_KINDS = ("particle", "request_form", "politeness", "false_friend", "similar_form", "other")
@@ -205,7 +205,7 @@ CREATE TABLE IF NOT EXISTS attempt_reports(   -- 自述與改判（append-only�
   outcome TEXT CHECK(outcome IS NULL OR outcome IN {_in(OUTCOMES)})   -- 改判（phase=correction）
 );
 CREATE INDEX IF NOT EXISTS idx_reports_attempt ON attempt_reports(attempt_id);
-CREATE TABLE IF NOT EXISTS encounters(    -- 在題目（題幹/選項）中看到但不認識的元素；答不出考點不記這裡
+CREATE TABLE IF NOT EXISTS encounters(    -- 題目中看到但不認識、或作答時想用但不會的元素；答不出考點本身不記這裡
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   term TEXT NOT NULL UNIQUE,
   reading TEXT, zh TEXT,
@@ -299,8 +299,9 @@ SELECT a.id, a.item_id, a.unit, a.presentation_id, a.ts, a.learn_day, a.session_
   EXISTS(SELECT 1 FROM attempt_reports r WHERE r.attempt_id=a.id AND r.phase='after_feedback') AS has_after_feedback,
   EXISTS(SELECT 1 FROM attempt_reports r WHERE r.attempt_id=a.id AND r.outcome IS NOT NULL) AS regraded,
   (SELECT group_concat(g.tag, ',') FROM attempt_tags g WHERE g.attempt_id=a.id) AS tags,
-  i.probe AS probe
-FROM attempts a JOIN items i ON i.id=a.item_id JOIN task_types t ON t.task=i.task""",
+  i.probe AS probe, p.round_id AS round_id, p.seq AS seq
+FROM attempts a JOIN items i ON i.id=a.item_id JOIN task_types t ON t.task=i.task
+  LEFT JOIN presentations p ON p.id=a.presentation_id""",
     "v_unit_status": """
 SELECT u.unit, u.kind, u.stage, u.gist,
   (SELECT group_concat(k.skill, ',') FROM unit_skills k WHERE k.unit=u.unit) AS skills,
@@ -377,6 +378,7 @@ SELECT e.id, e.term, e.reading, e.zh, e.kind, e.seen_count, e.first_seen, e.last
   v.status AS unit_status,
   (SELECT COUNT(*) FROM encounter_attempts x JOIN attempts a ON a.id=x.attempt_id JOIN items i ON i.id=a.item_id
      WHERE x.encounter_id=e.id AND i.probe=e.term) AS n_as_probe,
+  (SELECT COUNT(*) FROM encounter_attempts x WHERE x.encounter_id=e.id AND x.location='answer') AS n_wanted,
   (SELECT group_concat(x.attempt_id || ':' || x.location, ',') FROM encounter_attempts x
      WHERE x.encounter_id=e.id) AS attempts
 FROM encounters e LEFT JOIN v_unit_status v ON v.unit=e.unit""",
@@ -404,7 +406,7 @@ FROM confusions c""",
 }
 
 VIEW_DOCS = {
-    "v_attempt_effective": "attempts＋題型/skill＋最新自述(confidence/basis/miss，none＝撤回)＋改判後的 outcome＋tags",
+    "v_attempt_effective": "attempts＋題型/skill＋最新自述(confidence/basis/miss，none＝撤回)＋改判後的 outcome＋tags＋所屬輪次 round_id／seq",
     "v_unit_status": "每個 unit 的狀態 new/learning/review/consolidated（全部 skill 都鞏固才算）",
     "v_schedule": "unit×skill 排程（due_at、穩定度、lapses）",
     "v_item_progress": "每題被出幾次、答幾次、答對幾次",
@@ -417,7 +419,7 @@ VIEW_DOCS = {
     "v_comprehend_vs_produce": "同時有理解與產出的 unit：兩邊的狀態與答對數（找會認不會說）",
     "v_variants_needed": "該 skill 的每題都已在 2 個以上學習日答對、但未鞏固 → 需要新情境變體（避免只記住那一題）",
     "v_skill_gaps": "宣告了 skill 卻沒有該 skill 的有效題",
-    "v_encounters": "題目中看到但不認識的元素：open（未升格）/linked、看到次數、是否為刻意放入的 probe",
+    "v_encounters": "題目中看到但不認識、或作答時想用但不會（n_wanted）的元素：open（未升格）/linked、次數、是否為刻意放入的 probe",
     "v_parked": "暫停出題（整題看不懂等）的題目，與其 encounter 的 unit 進度（判斷何時 unpark）",
     "v_miss_reasons": "答錯原因自述（slip/probe/unreadable）× unit 次數",
     "confusion_status": "混淆對狀態 observed/drilling/resolved/merged/dropped",
@@ -510,7 +512,7 @@ def migrate_copy(path, old_version):
 
 def _post_migrate(con, old_version):
     """各版遷移後的值調整（AI 決定，只要下一輪測驗仍有意義）。"""
-    # v6 -> v7：confusions 加 dropped_at／drop_reason（新欄位預設 NULL），不需調整舊值
+    # v7 -> v8：encounter_attempts.location 多了 answer（作答時想用但不會），舊值不變
     pass
 
 
@@ -1357,9 +1359,15 @@ def cmd_record(con, args):
     r = open_round(con)
     if r["next_seq"]:
         print(f"本輪：已記錄 {r['recorded']}/{r['planned']}，下一題 seq {r['next_seq']}")
+        if r["recorded"] == r["planned"] - 1:
+            print(f"LAST_QUESTION：seq {r['next_seq']} 是本輪最後一題。使用者答完後，那則回覆先不寫文字："
+                  "record → checkpoint →（wrap_up）→ 最後才把這題的回饋和本輪報告一起寫出。")
         print("END_OF_REPLY：下一題已在上面的文字裡。只回一行「（已記錄）」就結束：不重印回饋或題目，不呼叫 wrap_up／update_plan。")
     else:
-        print(f"ROUND_COMPLETE: 本輪 {r['planned']} 題已全部記錄。做手動 checkpoint 結束本輪、回報，等使用者指示。")
+        n_ok = con.execute("SELECT COUNT(*) FROM v_attempt_effective WHERE round_id=? AND outcome='correct'",
+                           (r["id"],)).fetchone()[0]
+        print(f"ROUND_COMPLETE: 本輪 {r['planned']} 題已全部記錄，答對 {n_ok}。做手動 checkpoint 結束本輪，"
+              "最後一題的回饋和本輪報告一起寫在最後，然後等使用者指示。")
 
 
 def cmd_report(con, args):
@@ -1506,7 +1514,7 @@ def cmd_resume(con, args):
         print(f"題庫：需要新情境變體 {nv} 組（jl.py variants）、缺題的 skill {ng} 組")
     enc = con.execute("SELECT term FROM v_encounters WHERE status='open' ORDER BY seen_count DESC, last_seen DESC").fetchall()
     if enc:
-        print(f"題目中遇到、尚未升格的未知元素 {len(enc)} 個：" + "、".join(r["term"] for r in enc[:8])
+        print(f"題目中遇到或作答時想用、尚未升格的未知元素 {len(enc)} 個：" + "、".join(r["term"] for r in enc[:8])
               + "（jl.py seen list --open）")
     npk = con.execute("SELECT COUNT(*) FROM v_parked").fetchone()[0]
     if npk:
@@ -1600,9 +1608,10 @@ def cmd_variants(con, args):
             print(f"  {r['unit']}/{r['skill']}")
     enc = con.execute("SELECT * FROM v_encounters WHERE status='open' ORDER BY seen_count DESC").fetchall()
     if enc:
-        print(f"題目中遇到、尚未升格的未知元素：{len(enc)} 個（可出成新 unit，units 段帶 from_encounter）")
+        print(f"題目中遇到或作答時想用、尚未升格的未知元素：{len(enc)} 個（可出成新 unit，units 段帶 from_encounter）")
         for r in enc:
-            print(f"  {r['term']}（{r['reading'] or '-'}／{r['zh'] or '-'}）kind={r['kind']} seen={r['seen_count']}")
+            print(f"  {r['term']}（{r['reading'] or '-'}／{r['zh'] or '-'}）kind={r['kind']} seen={r['seen_count']}"
+                  + (f" 想用但不會={r['n_wanted']}" if r["n_wanted"] else ""))
     pk = con.execute("SELECT * FROM v_parked").fetchall()
     if pk:
         print(f"暫停出題的題目：{len(pk)} 題")
@@ -1785,7 +1794,7 @@ def add_encounter(con, term, kind, attempt_id, where="prompt", reading=None, zh=
 
 
 def cmd_seen(con, args):
-    """題目（題幹/選項）中看到但不認識的元素。答不出考點本身不記這裡。"""
+    """題目（題幹/選項）中看到但不認識、或作答時想用但不會（where=answer）的元素。答不出考點本身不記這裡。"""
     if args.action == "add":
         eid, verb = add_encounter(con, args.term, args.kind, args.attempt, args.where, args.reading, args.zh,
                                   args.unit, args.note)

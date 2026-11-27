@@ -1357,7 +1357,7 @@ def cmd_record(con, args):
     r = open_round(con)
     if r["next_seq"]:
         print(f"本輪：已記錄 {r['recorded']}/{r['planned']}，下一題 seq {r['next_seq']}")
-        print("END_OF_REPLY：下一題已在這則回覆的文字裡。到此結束回覆，不要再輸出任何文字（不確認、不重印題目）。")
+        print("END_OF_REPLY：下一題已在這則回覆的文字裡。到此結束回覆：不再輸出文字，也不呼叫 wrap_up／update_plan。")
     else:
         print(f"ROUND_COMPLETE: 本輪 {r['planned']} 題已全部記錄。做手動 checkpoint 結束本輪、回報，等使用者指示。")
 

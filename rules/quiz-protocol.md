@@ -22,7 +22,10 @@
 4. **回饋並出下一題**：同一則回覆裡先回饋，再出下一題。
 5. **寫入（後寫）**：在同一則回覆的**最後**呼叫 `record`，寫入剛答完的那一題。`record` 的輸出最後一行是 `END_OF_REPLY`：
    **工具結果回來就結束回覆，不輸出任何文字**——不說「記好了」、不重印題目、不提醒「等你作答」。
-   下一題已經在工具呼叫前的文字裡；多輸出一句話只會拉長使用者送出下一個答案時、回覆還沒結束的空檔。用 Bash 工具的 heredoc 傳 JSON（PowerShell 的管線會弄壞日文）：
+   下一題已經在工具呼叫前的文字裡；多輸出一句話只會拉長使用者送出下一個答案時、回覆還沒結束的空檔。
+   **從第 1 題出現到 `ROUND_COMPLETE`，每題的回覆只有「文字（回饋＋下一題）→ `record`」，不呼叫 app 的 `update_plan`、`wrap_up`**：
+   app 的收尾工具要求文字放在它之後，和後寫衝突，會讓回饋與下一題消失。
+   任務清單與 `wrap_up` 只用在開場備題那一則（第 1 題的文字放在 `wrap_up` 之後），以及一輪結束的 checkpoint 與報告。用 Bash 工具的 heredoc 傳 JSON（PowerShell 的管線會弄壞日文）：
    ```
    python -X utf8 tools/jl.py record <<'EOF'
    [{"seq": 3, "answer": "<使用者原文>", "outcome": "incorrect", "tags": ["particle"], "note": "..."}]

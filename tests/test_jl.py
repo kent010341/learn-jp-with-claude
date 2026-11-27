@@ -206,7 +206,9 @@ class TestRecord(Base):
         s1 = self.add("e_long")
         self.jl("round", "add", "b_free")
         out = self.record([{"seq": s1, "answer": "おおきい", "outcome": "correct"}]).stdout
-        self.assertEqual(out.strip().splitlines()[-1].split("：")[0], "END_OF_REPLY")
+        last = out.strip().splitlines()[-1]
+        self.assertEqual(last.split("：")[0], "END_OF_REPLY")
+        self.assertIn("wrap_up", last)  # app 的收尾工具會讓先寫的回饋與下一題消失
 
 
 class TestLearnDay(Base):

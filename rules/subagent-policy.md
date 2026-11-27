@@ -21,6 +21,8 @@
 - 流程：generator → reviewer → 通過者 `python tools/jl.py import <round.json>` → 主對話開始出題。
   reviewer 退回的題目：把退回理由交給 generator **修一次**，只重審修過的那幾題；第二次仍退回就剔除，
   並把它原本要練的點寫進下一個 checkpoint 的 next_focus。不得未審就匯入。
+  修題用 SendMessage 送給**剛才出題的那個 generator**（id 在 Agent 工具的結果裡）：它還記得規則與這一輪的題目，不必重新冷啟動。
+  id 不見了（例如 compact 後）就直接開新的 generator，不必跟使用者說明。不跨 session 續用、不把 id 存檔（舊 generator 記得的是舊題庫）。
 - 每輪的 `round_id` 不能重複使用（`import` 會拒絕並提示下一個編號，例如 `stage1_r5`）。
 - **`data/rounds/` 是暫存區**：generator 的題目檔與 reviewer 的 `.review.txt` 只在流程中存在。
   審題通過並匯入（或複製進 `curriculum/seed/` 並確認已匯入）後，**主對話立刻刪除該輪所有檔案**，不留歷史。

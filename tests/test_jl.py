@@ -499,6 +499,18 @@ class TestImportAndTasks(Base):
         fields = [r[0] for r in self.sql("SELECT field FROM item_edits ORDER BY id")]
         self.assertEqual(fields, ["answers", "judge", "answers"])
 
+    def test_item_edit_set_choices(self):
+        self.jl("item", "edit", "c_choice", "--set-choices",
+                json.dumps(["で", {"text": "を", "unit": "u_ni"}, "へ"], ensure_ascii=False))
+        it = self.sql("SELECT choices, choice_units FROM items WHERE key='c_choice'")[0]
+        self.assertEqual(json.loads(it["choices"]), ["で", "を", "へ"])
+        self.assertEqual(json.loads(it["choice_units"]), [None, "u_ni", None])
+        # 答案不在新選項裡、不存在的 unit、非選擇題 → 拒絕
+        for key, ch in (("c_choice", ["を", "へ"]), ("c_choice", ["で", {"text": "を", "unit": "nope"}]),
+                        ("a_free", ["で", "に"])):
+            self.assertNotEqual(self.jl("item", "edit", key, "--set-choices",
+                                        json.dumps(ch, ensure_ascii=False), ok=False).returncode, 0)
+
 
 class TestQueries(Base):
     def test_sql_select_and_view(self):
@@ -654,6 +666,27 @@ class TestConfusion(Base):
         self.assertNotIn("進行中的混淆", self.jl("resume").stdout)
         self.assertIn("no active confusion 1", self.jl("confusion", "drop", 1, "--reason", "x").stdout)
         self.assertEqual(self.sql("SELECT COUNT(*) FROM confusions")[0][0], 1)  # 紀錄保留
+
+    def test_add_on_dropped_revives(self):
+        self.add_c()
+        self.jl("confusion", "taught", 1)
+        self.jl("confusion", "drop", 1, "--reason", "x")
+        self.assertIn("revived confusion 1", self.add_c().stdout)
+        self.assertEqual(self.status(), "drilling")
+        self.assertEqual(self.sql("SELECT drop_reason FROM confusions")[0][0], None)
+
+    def test_miss_count_follows_linked_attempts(self):
+        self.answer("c_choice", "x", outcome="incorrect")
+        self.answer("ni_choice", "x", outcome="incorrect")
+        aid1, aid2 = [r[0] for r in self.sql("SELECT id FROM attempts ORDER BY id")]
+        self.add_c("--attempt", aid1)
+        self.add_c("--attempt", aid1)  # 同一筆作答重複 add 不重複計
+        self.assertEqual(self.sql("SELECT miss_count FROM confusions")[0][0], 1)
+        self.add_c("--attempt", aid2)
+        self.assertEqual(self.sql("SELECT miss_count FROM confusions")[0][0], 2)
+        self.jl("report", "--attempt", aid2, "--miss", "probe")  # 卡在看不懂的詞：rebuild 後不算
+        self.jl("rebuild")
+        self.assertEqual(self.sql("SELECT miss_count FROM confusions")[0][0], 1)
 
 
 class TestUnitSplit(Base):

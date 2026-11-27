@@ -32,13 +32,13 @@ Windows 上若輸出亂碼，加 `-X utf8`：`python -X utf8 tools/jl.py ...`。
 | `task add <name> --skill comprehend\|produce --grading auto\|auto_then_judge\|judge --desc ".."` / `task list` | 新增／列出題型 |
 | `unit set <unit> [--gist ..] [--label ..] [--add-skill ..]` | 修改 unit 重點或宣告 skill |
 | `unit split <unit> --new <新 unit> --items <key,...> --gist ".." [--label ..] [--jp ..] [--zh ..]` | 一個 unit 混了兩種用法時拆開：題目連同作答搬到新 unit、記入 `item_edits`、兩邊重算排程（開發期允許，見 `../docs/development.md`） |
-| `item edit <key> [--set-answers '<JSON list>'] [--add-answer ..] [--remove-answer ..] [--judge ..] [--probe ..] [--explain ..] [--zh ..] [--reading ..] [--prompt ..]` | 修題，舊值存入 `item_edits`；產出題 answers 最多 5 個 |
+| `item edit <key> [--set-choices '<JSON list>'] [--set-answers '<JSON list>'] [--add-answer ..] [--remove-answer ..] [--judge ..] [--probe ..] [--explain ..] [--zh ..] [--reading ..] [--prompt ..]` | 修題，舊值存入 `item_edits`；產出題 answers 最多 5 個 |
 | `retire <key> --reason ".."` | 停用題目（不再出題，紀錄保留） |
 | `item park <key> --reason ".."` / `item unpark <key>` | 暫停／恢復出題（例如整題看不懂），與永久 retire 區分；暫停中的題目見 `v_parked` |
 | `seen link <id\|term> <unit>` | 把未知元素連到 unit（匯入時也可用 units 段的 `from_encounter`） |
 | `stage [n]` | 查看／設定階段（新題只從 stage <= n 抽） |
 | `rebuild` | 由 attempts＋自述重算全部 `unit_state`、`unit_stats` |
-| `confusion add/taught/merge/drop` | `drop <id> --reason ..`：證據不成立時撤銷（保留紀錄）。見 `../rules/quiz-protocol.md` 與 `../data/CLAUDE.md` |
+| `confusion add/taught/merge/drop` | `drop <id> --reason ..`：證據不成立時撤銷（保留紀錄）；之後同一組再 `add` 會恢復（`revived`）。附 `--attempt` 時次數依連結的作答計算，重複 add 不重複計。見 `../rules/quiz-protocol.md` 與 `../data/CLAUDE.md` |
 
 ## 題目 JSON 格式（seed 與 `data/rounds/*.json` 共用）
 ```json

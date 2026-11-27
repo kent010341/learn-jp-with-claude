@@ -44,6 +44,7 @@
 - `cause`：zh_transfer｜overgeneralize｜form_mixup｜sound_mixup｜unknown
 - `axis`：form｜meaning｜usage
 - 狀態不存，由 `confusion_status` 衍生：taught_at 為空＝observed；已講解且成員有任一 unit 未 consolidated＝drilling；全部 consolidated＝resolved；merged；dropped（證據不成立而撤銷，例如事後自述是看不懂詞）。
+- `miss_count`：有連結作答時＝連結的作答中事後自述不是 probe／unreadable 的筆數（add、merge、`rebuild` 時重算）。
 - 只在「兩個合理選項選錯」時建立；`answer` 的 `CONFUSION_CANDIDATE` 只是提示。以 `jl.py confusion add/taught/merge/drop/list` 操作。
 
 ## rounds/

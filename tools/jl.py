@@ -987,7 +987,20 @@ def rebuild_all(con):
     units = [r["unit"] for r in con.execute("SELECT DISTINCT unit FROM attempts")]
     for u in units:
         refresh_unit(con, u, cfg)
+    for (cid,) in con.execute("SELECT id FROM confusions WHERE merged_into IS NULL").fetchall():
+        recount_confusion(con, cid)
     return len(units)
+
+
+def recount_confusion(con, cid):
+    """miss_count＝連結的作答中，事後自述不是 probe／unreadable 的筆數（卡在看不懂的詞不算對比錯誤）。
+    沒有連結作答的舊紀錄不動。"""
+    n_all, n_valid = con.execute(
+        """SELECT COUNT(*), COALESCE(SUM(e.miss IS NULL OR e.miss NOT IN ('probe','unreadable')), 0)
+           FROM confusion_attempts ca JOIN v_attempt_effective e ON e.id=ca.attempt_id
+           WHERE ca.confusion_id=?""", (cid,)).fetchone()
+    if n_all:
+        con.execute("UPDATE confusions SET miss_count=? WHERE id=?", (n_valid, cid))
 
 
 # --------------------------------------------------------------------------- 出題
@@ -1389,7 +1402,8 @@ def cmd_due(con, args):
 
 def cmd_weak(con, args):
     print("== 最弱單元（lapses 多 / 穩定度低）")
-    for r in con.execute("""SELECT s.unit, s.skill, s.tier, s.stability_days S, s.lapses, u.jp, u.zh,
+    for r in con.execute("""SELECT s.unit, s.skill, s.tier, s.stability_days S, s.lapses,
+                            COALESCE(u.jp, u.label) jp, COALESCE(u.zh, u.gist) zh,
                             st.n, st.n_correct FROM unit_state s JOIN units u ON u.unit=s.unit
                             LEFT JOIN unit_stats st ON st.unit=s.unit AND st.skill=s.skill
                             ORDER BY s.lapses DESC, s.stability_days ASC LIMIT ?""", (args.limit,)):
@@ -1704,15 +1718,30 @@ def cmd_item(con, args):
         print(f"unparked {args.key}")
         return
     changes = {}
-    if args.set_answers or args.add_answer or args.remove_answer:
+    choices = json.loads(it["choices"]) if it["choices"] else None
+    if args.set_choices:  # 換誘答項（格式同題目 JSON：字串或 {"text","unit"}）
+        if not choices:
+            raise SystemExit("--set-choices 只用於選擇式題目")
+        raw = json.loads(args.set_choices)
+        if not isinstance(raw, list) or len(raw) < 2:
+            raise SystemExit("--set-choices 必須是至少兩個選項的 JSON list")
+        texts, cunits = _split_choices(raw)
+        for u in cunits or []:
+            if u and not con.execute("SELECT 1 FROM units WHERE unit=?", (u,)).fetchone():
+                raise SystemExit(f"unit 不存在：{u}")
+        choices = texts
+        changes["choices"] = json.dumps(texts, ensure_ascii=False)
+        changes["choice_units"] = json.dumps(cunits, ensure_ascii=False) if cunits else None
+    if args.set_answers or args.add_answer or args.remove_answer or args.set_choices:
         ans = json.loads(args.set_answers) if args.set_answers else json.loads(it["answers"])
         if not isinstance(ans, list) or not all(isinstance(a, str) for a in ans):
             raise SystemExit("--set-answers 必須是字串的 JSON list")
         ans += [a for a in args.add_answer or [] if a not in ans]
         ans = [a for a in ans if a not in (args.remove_answer or [])]
-        if it["choices"] and not any(a in json.loads(it["choices"]) for a in ans):
+        if choices and not all(a in choices for a in ans):
             raise SystemExit("選擇式題目的 answers 必須出現在 choices 中")
-        changes["answers"] = json.dumps(ans, ensure_ascii=False)
+        if args.set_answers or args.add_answer or args.remove_answer:
+            changes["answers"] = json.dumps(ans, ensure_ascii=False)
     for f in ("explain", "zh", "reading", "prompt", "judge", "probe"):
         v = getattr(args, f)
         if v is not None:
@@ -1891,8 +1920,14 @@ def cmd_confusion(con, args):
         row = con.execute("SELECT id, merged_into FROM confusions WHERE pair_key=?", (key,)).fetchone()
         if row:
             cid = row["merged_into"] or row["id"]
-            con.execute("UPDATE confusions SET miss_count=miss_count+1, last_seen=? WHERE id=?", (ts, cid))
             verb = "updated"
+            if con.execute("SELECT dropped_at FROM confusions WHERE id=?", (cid,)).fetchone()[0] is not None:
+                # 先前因證據不成立撤銷，這次有新的對比型錯誤：恢復成進行中
+                con.execute("UPDATE confusions SET dropped_at=NULL, drop_reason=NULL WHERE id=?", (cid,))
+                verb = "revived"
+            con.execute("UPDATE confusions SET last_seen=? WHERE id=?", (ts, cid))
+            if not args.attempt:  # 有附作答時，次數由 recount_confusion 依連結的作答重算（重複 add 不重複計）
+                con.execute("UPDATE confusions SET miss_count=miss_count+1 WHERE id=?", (cid,))
         else:
             cid = con.execute("""INSERT INTO confusions(label,kind,cause,axis,gist,pair_key,first_seen,last_seen)
                                  VALUES(?,?,?,?,?,?,?,?)""",
@@ -1901,6 +1936,7 @@ def cmd_confusion(con, args):
             verb = "created"
         for aid in args.attempt or []:
             con.execute("INSERT OR IGNORE INTO confusion_attempts(confusion_id,attempt_id) VALUES(?,?)", (cid, aid))
+        recount_confusion(con, cid)
         con.commit()
         print(f"{verb} confusion {cid}: {args.label}")
     elif act == "taught":
@@ -1924,6 +1960,7 @@ def cmd_confusion(con, args):
                     "WHERE confusion_id=?", (args.into, args.id))
         con.execute("INSERT OR IGNORE INTO confusion_members SELECT ?, unit FROM confusion_members "
                     "WHERE confusion_id=?", (args.into, args.id))
+        recount_confusion(con, args.into)
         con.commit()
         print(f"merged {args.id} -> {args.into}")
     elif act == "drop":  # 證據不成立（例如事後自述 miss=probe／unreadable）：撤銷，紀錄保留
@@ -1984,6 +2021,7 @@ def build_parser():
     p = sub.add_parser("item"); its = p.add_subparsers(dest="action", required=True)
     q = its.add_parser("edit"); q.add_argument("key")
     q.add_argument("--set-answers", help="整個替換 answers（JSON list）")
+    q.add_argument("--set-choices", help="整個替換選項（JSON list，字串或 {\"text\",\"unit\"}）")
     q.add_argument("--add-answer", action="append"); q.add_argument("--remove-answer", action="append")
     for f in ("explain", "zh", "reading", "prompt", "judge", "probe"):
         q.add_argument(f"--{f}")

@@ -88,6 +88,29 @@
 - 本專案怎麼用：只作為「略高一點、但要可理解」的直覺背景，不作為設計依據。
 - 限制：難以證偽、證據有爭議；2025 年的回顧認為它在概念與實證上都不足。
 
+### 13. Metcalfe（2017）— 從錯誤中學習（綜述）
+- citation：Metcalfe, J. (2017). Learning from errors. *Annual Review of Psychology*, 68, 465–489. https://doi.org/10.1146/annurev-psych-010416-044022
+- 重點：實驗顯示「犯錯後立即給正確回饋」有利學習，刻意避免犯錯反而可能適得其反；高信心的錯誤更容易被糾正（hypercorrection）。回饋是關鍵。
+- 本專案怎麼用：完全沒學過的點（例如意向形）連錯多次不是問題，不為此改排題；要顧的是每次回饋都正確、說法一致（`rules/quiz-protocol.md`「答錯回饋格式」）。
+- 限制：只讀到摘要；多為實驗室研究，材料多為事實與詞彙。
+
+### 14. Norris & Ortega（2000）— 第二語言教學效果的統合分析
+- citation：Norris, J. M., & Ortega, L. (2000). Effectiveness of L2 instruction: A research synthesis and quantitative meta-analysis. *Language Learning*, 50(3), 417–528.
+- 重點：針對特定語言形式的教學效果大，且明示（explicit，直接說規則）優於隱示；效果能持續。
+- 本專案怎麼用：形式規則（如動詞變形）在回饋中直接、正確地說出規則是合理的；規則的標準說法寫在 unit 的 gist。
+- 限制：Shin（2010）等批評原始研究品質與編碼方式；明示教學的優勢可能部分來自測驗形式偏向明示知識。
+
+### 15. Lyster & Saito（2010）— 課堂口語糾錯回饋的統合分析
+- citation：Lyster, R., & Saito, K. (2010). Oral feedback in classroom SLA: A meta-analysis. *Studies in Second Language Acquisition*, 32(2), 265–302.
+- 重點：15 個課堂研究；「提示學習者自己改正」（prompts）的效果大於直接給出正確說法（recasts），在自由產出的測量上最明顯。
+- 本專案怎麼用：目前未採用（每題一問一答、一輪內不重測，以保持節奏）；下一輪同 unit 換題重考，等於延後的自我修正機會。若某個形式長期卡關，可考慮在回饋後加一句「換這個動詞試試」。
+- 限制：研究數少、為口語課堂互動，不直接等於文字測驗。
+
+### 結論（2026-11，意向形連錯五次的檢討）
+- 依 #13，連錯本身不需處理；不改排題（不強制先出理解題）。
+- 實際的破口是回饋品質：練習時模型自行歸納出「える／いる 結尾→よう」，下一輪的 帰る→帰ろう 正好是例外。
+  → unit gist 寫出兩類動詞的標準說法，回饋照 gist 講、不自創通則（#14）。
+
 ---
 
 ## 待補
